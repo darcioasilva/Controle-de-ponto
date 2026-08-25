@@ -78,6 +78,37 @@ function fmtDuration(mins) {
   return `${h}h${pad2(m)}`;
 }
 
+const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+
+function timeToMinutes(t) {
+  if (!t) return null;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+}
+
+function getScheduleStatus(punch, employee) {
+  const sch = employee?.schedule;
+  if (!sch || !sch.days || sch.days.length === 0) return null;
+  const d = new Date(punch.at);
+  const day = d.getDay();
+  if (!sch.days.includes(day)) return { label: "Fora da escala", color: COLORS.amber };
+  const punchMin = d.getHours() * 60 + d.getMinutes();
+  const tol = sch.tolerance ?? 10;
+  if (punch.action === "entrada") {
+    const expected = timeToMinutes(sch.entrada);
+    if (expected == null) return null;
+    const diff = punchMin - expected;
+    if (diff > tol) return { label: `Atraso de ${diff}min`, color: COLORS.red };
+    return { label: "No horário", color: COLORS.teal };
+  } else {
+    const expected = timeToMinutes(sch.saida);
+    if (expected == null) return null;
+    const diff = expected - punchMin;
+    if (diff > tol) return { label: `Saída antecipada (${diff}min)`, color: COLORS.amber };
+    return { label: "No horário", color: COLORS.teal };
+  }
+}
+
 // ---------- Geo / image helpers ----------
 function getLocation(timeoutMs = 6000) {
   return new Promise((resolve) => {
@@ -717,7 +748,10 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
         {rows.length === 0 ? (
           <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum registro para esse filtro.</div>
-        ) : rows.map((p, i) => (
+        ) : rows.map((p, i) => {
+          const emp = employees.find(e => e.id === p.employeeId);
+          const status = getScheduleStatus(p, emp);
+          return (
           <div key={p.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", cursor: p.photo || p.location ? "pointer" : "default" }}
               onClick={() => setExpanded(expanded === p.id ? null : p.id)}>
@@ -734,12 +768,14 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
                 <div style={{ color: COLORS.textDim, fontSize: 12 }}>
                   {STORES.find(s => s.id === p.store)?.label} · {p.action === "entrada" ? "Entrada" : "Saída"} · {fmtDate(new Date(p.at))}
                 </div>
+                {status && (
+                  <div style={{ fontSize: 11, color: status.color, marginTop: 2, fontWeight: 600 }}>{status.label}</div>
+                )}
               </div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 15 }}>{fmtTime(new Date(p.at))}</div>
               <button onClick={(e) => { e.stopPropagation(); removeRecord(p.id); }} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
             </div>
             {expanded === p.id && (() => {
-              const emp = employees.find(e => e.id === p.employeeId);
               return (
                 <div style={{ padding: "0 14px 14px 58px", display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
                   <div style={{ display: "flex", gap: 8 }}>
@@ -773,7 +809,8 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
               );
             })()}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       <DaySummary punches={punches} filterStore={filterStore} filterDate={filterDate} />
@@ -1000,6 +1037,7 @@ function EmployeesTab({ employees, persistEmployees }) {
   const [showForm, setShowForm] = useState(false);
   const [name, setName] = useState(""); const [pin, setPin] = useState(""); const [store, setStore] = useState(STORES[0].id); const [err, setErr] = useState("");
   const [refPhoto, setRefPhoto] = useState(null);
+  const [editingSchedule, setEditingSchedule] = useState(null);
   const fileRef = useRef(null);
 
   const handleRefPhoto = async (e) => {
@@ -1013,11 +1051,15 @@ function EmployeesTab({ employees, persistEmployees }) {
     if (!name.trim()) { setErr("Informe o nome."); return; }
     if (!/^\d{4}$/.test(pin)) { setErr("PIN precisa ter 4 dígitos."); return; }
     if (employees.some(e => e.pin === pin && e.store === store)) { setErr("Esse PIN já está em uso nessa loja."); return; }
-    await persistEmployees([...employees, { id: `${Date.now()}`, name: name.trim(), pin, store, active: true, photo: refPhoto || null }]);
+    await persistEmployees([...employees, { id: `${Date.now()}`, name: name.trim(), pin, store, active: true, photo: refPhoto || null, schedule: null }]);
     setName(""); setPin(""); setErr(""); setRefPhoto(null); setShowForm(false);
   };
   const toggleActive = async (id) => { await persistEmployees(employees.map(e => e.id === id ? { ...e, active: !(e.active !== false) } : e)); };
   const removeEmployee = async (id) => { await persistEmployees(employees.filter(e => e.id !== id)); };
+  const saveSchedule = async (id, schedule) => {
+    await persistEmployees(employees.map(e => e.id === id ? { ...e, schedule } : e));
+    setEditingSchedule(null);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1041,6 +1083,7 @@ function EmployeesTab({ employees, persistEmployees }) {
             <select value={store} onChange={e => setStore(e.target.value)} style={selectStyle}>{STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
           </div>
           {err && <div style={{ color: COLORS.red, fontSize: 12 }}>{err}</div>}
+          <div style={{ color: COLORS.textDim, fontSize: 11 }}>O horário de trabalho é configurado depois, na lista abaixo.</div>
           <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
             <button onClick={addEmployee} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
             <button onClick={() => { setShowForm(false); setErr(""); setRefPhoto(null); }} style={ghostBtnStyle}>Cancelar</button>
@@ -1055,25 +1098,87 @@ function EmployeesTab({ employees, persistEmployees }) {
             {employees.filter(e => e.store === s.id).length === 0 ? (
               <div style={{ padding: 16, color: COLORS.textDim, fontSize: 13 }}>Nenhum funcionário cadastrado.</div>
             ) : employees.filter(e => e.store === s.id).map((e, i) => (
-              <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none", opacity: e.active === false ? 0.5 : 1 }}>
-                {e.photo ? (
-                  <img src={e.photo} alt="" style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
-                ) : (
-                  <div style={{ width: 36, height: 36, borderRadius: "50%", background: COLORS.surfaceRaised, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
-                    <Users size={15} color={COLORS.textDim} />
+              <div key={e.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", opacity: e.active === false ? 0.5 : 1 }}>
+                  {e.photo ? (
+                    <img src={e.photo} alt="" style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                  ) : (
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: COLORS.surfaceRaised, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Users size={15} color={COLORS.textDim} />
+                    </div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{e.name}</div>
+                    <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {e.pin}</div>
+                    {e.schedule ? (
+                      <div style={{ color: COLORS.teal, fontSize: 11, marginTop: 2 }}>
+                        {e.schedule.entrada}–{e.schedule.saida} · {e.schedule.days.map(d => WEEKDAYS[d]).join(" ")}
+                      </div>
+                    ) : (
+                      <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>Sem horário definido</div>
+                    )}
                   </div>
-                )}
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{e.name}</div>
-                  <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {e.pin}</div>
+                  <button onClick={() => setEditingSchedule(editingSchedule === e.id ? null : e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>
+                    <Clock size={12} /> Horário
+                  </button>
+                  <button onClick={() => toggleActive(e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>{e.active === false ? "Ativar" : "Desativar"}</button>
+                  <button onClick={() => removeEmployee(e.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
                 </div>
-                <button onClick={() => toggleActive(e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>{e.active === false ? "Ativar" : "Desativar"}</button>
-                <button onClick={() => removeEmployee(e.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+                {editingSchedule === e.id && (
+                  <ScheduleEditor employee={e} onSave={(sch) => saveSchedule(e.id, sch)} onCancel={() => setEditingSchedule(null)} />
+                )}
               </div>
             ))}
           </div>
         </div>
       ))}
+    </div>
+  );
+}
+
+function ScheduleEditor({ employee, onSave, onCancel }) {
+  const initial = employee.schedule || { entrada: "08:00", saida: "17:00", days: [1, 2, 3, 4, 5, 6], tolerance: 10 };
+  const [entrada, setEntrada] = useState(initial.entrada);
+  const [saida, setSaida] = useState(initial.saida);
+  const [days, setDays] = useState(initial.days);
+  const [tolerance, setTolerance] = useState(initial.tolerance ?? 10);
+
+  const toggleDay = (d) => setDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort());
+
+  return (
+    <div style={{ padding: "0 14px 14px 14px", display: "flex", flexDirection: "column", gap: 10, background: COLORS.surfaceRaised }}>
+      <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ flex: 1 }}>
+          <div style={fieldLabel}>Entrada</div>
+          <input type="time" value={entrada} onChange={e => setEntrada(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <div style={fieldLabel}>Saída</div>
+          <input type="time" value={saida} onChange={e => setSaida(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
+        </div>
+        <div style={{ width: 90 }}>
+          <div style={fieldLabel}>Tolerância</div>
+          <input type="number" value={tolerance} onChange={e => setTolerance(Number(e.target.value) || 0)} style={{ ...selectStyle, width: "100%" }} />
+        </div>
+      </div>
+      <div>
+        <div style={fieldLabel}>Dias de trabalho</div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {WEEKDAYS.map((label, d) => (
+            <button key={d} onClick={() => toggleDay(d)} style={{
+              width: 40, height: 32, borderRadius: 7, fontSize: 12, fontWeight: 600,
+              background: days.includes(d) ? COLORS.amber : COLORS.surface,
+              color: days.includes(d) ? "#1A1400" : COLORS.textDim,
+              border: `1px solid ${days.includes(d) ? COLORS.amber : COLORS.border}`,
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => onSave({ entrada, saida, days, tolerance })} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar horário</button>
+        <button onClick={onCancel} style={ghostBtnStyle}>Cancelar</button>
+      </div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>Tolerância: minutos de atraso/antecipação aceitos antes de marcar como fora do horário.</div>
     </div>
   );
 }
