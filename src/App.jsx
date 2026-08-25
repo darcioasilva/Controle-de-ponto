@@ -79,6 +79,7 @@ function fmtDuration(mins) {
 }
 
 const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
+const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // Seg...Dom, ordem de exibição
 
 function timeToMinutes(t) {
   if (!t) return null;
@@ -86,22 +87,58 @@ function timeToMinutes(t) {
   return h * 60 + m;
 }
 
+// Converte o formato antigo (schedule.days + entrada/saida únicos) para o novo
+// formato por dia (schedule.perDay = { 0: {entrada,saida}|null, ... 6: ... })
+function normalizeSchedule(sch) {
+  if (!sch) return null;
+  if (sch.perDay) return { perDay: sch.perDay, tolerance: sch.tolerance ?? 10 };
+  if (sch.days) {
+    const perDay = {};
+    sch.days.forEach(d => { perDay[d] = { entrada: sch.entrada, saida: sch.saida }; });
+    return { perDay, tolerance: sch.tolerance ?? 10 };
+  }
+  return null;
+}
+
+function formatScheduleSummary(schedule) {
+  const norm = normalizeSchedule(schedule);
+  if (!norm) return null;
+  const segments = [];
+  let i = 0;
+  while (i < WEEK_ORDER.length) {
+    const day = WEEK_ORDER[i];
+    const info = norm.perDay[day];
+    if (!info) { i++; continue; }
+    let j = i;
+    while (j + 1 < WEEK_ORDER.length) {
+      const nextInfo = norm.perDay[WEEK_ORDER[j + 1]];
+      if (nextInfo && nextInfo.entrada === info.entrada && nextInfo.saida === info.saida) j++;
+      else break;
+    }
+    const label = j > i ? `${WEEKDAYS[WEEK_ORDER[i]]}-${WEEKDAYS[WEEK_ORDER[j]]}` : WEEKDAYS[WEEK_ORDER[i]];
+    segments.push(`${label} ${info.entrada}-${info.saida}`);
+    i = j + 1;
+  }
+  return segments.length ? segments.join(" · ") : null;
+}
+
 function getScheduleStatus(punch, employee) {
-  const sch = employee?.schedule;
-  if (!sch || !sch.days || sch.days.length === 0) return null;
+  const norm = normalizeSchedule(employee?.schedule);
+  if (!norm) return null;
   const d = new Date(punch.at);
   const day = d.getDay();
-  if (!sch.days.includes(day)) return { label: "Fora da escala", color: COLORS.amber };
+  const info = norm.perDay[day];
+  if (!info) return { label: "Fora da escala", color: COLORS.amber };
   const punchMin = d.getHours() * 60 + d.getMinutes();
-  const tol = sch.tolerance ?? 10;
+  const tol = norm.tolerance ?? 10;
   if (punch.action === "entrada") {
-    const expected = timeToMinutes(sch.entrada);
+    const expected = timeToMinutes(info.entrada);
     if (expected == null) return null;
     const diff = punchMin - expected;
     if (diff > tol) return { label: `Atraso de ${diff}min`, color: COLORS.red };
     return { label: "No horário", color: COLORS.teal };
   } else {
-    const expected = timeToMinutes(sch.saida);
+    const expected = timeToMinutes(info.saida);
     if (expected == null) return null;
     const diff = expected - punchMin;
     if (diff > tol) return { label: `Saída antecipada (${diff}min)`, color: COLORS.amber };
@@ -112,21 +149,22 @@ function getScheduleStatus(punch, employee) {
 // Verifica se o horário atual exige confirmação antes de bater o ponto
 // (chegou cedo demais na entrada, ou está saindo antes da hora)
 function checkTimingIssue(employee, action) {
-  const sch = employee?.schedule;
-  if (!sch || !sch.days || sch.days.length === 0) return null;
+  const norm = normalizeSchedule(employee?.schedule);
+  if (!norm) return null;
   const now = new Date();
   const day = now.getDay();
-  if (!sch.days.includes(day)) return null;
+  const info = norm.perDay[day];
+  if (!info) return null;
   const nowMin = now.getHours() * 60 + now.getMinutes();
-  const tol = sch.tolerance ?? 10;
+  const tol = norm.tolerance ?? 10;
   if (action === "entrada") {
-    const expected = timeToMinutes(sch.entrada);
+    const expected = timeToMinutes(info.entrada);
     if (expected == null) return null;
-    if (nowMin < expected - tol) return { type: "early_entry", expected: sch.entrada, diff: expected - nowMin };
+    if (nowMin < expected - tol) return { type: "early_entry", expected: info.entrada, diff: expected - nowMin };
   } else {
-    const expected = timeToMinutes(sch.saida);
+    const expected = timeToMinutes(info.saida);
     if (expected == null) return null;
-    if (nowMin < expected - tol) return { type: "early_exit", expected: sch.saida, diff: expected - nowMin };
+    if (nowMin < expected - tol) return { type: "early_exit", expected: info.saida, diff: expected - nowMin };
   }
   return null;
 }
@@ -1195,7 +1233,7 @@ function EmployeesTab({ employees, persistEmployees }) {
                     <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {e.pin}</div>
                     {e.schedule ? (
                       <div style={{ color: COLORS.teal, fontSize: 11, marginTop: 2 }}>
-                        {e.schedule.entrada}–{e.schedule.saida} · {e.schedule.days.map(d => WEEKDAYS[d]).join(" ")}
+                        {formatScheduleSummary(e.schedule)}
                       </div>
                     ) : (
                       <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>Sem horário definido</div>
@@ -1220,45 +1258,70 @@ function EmployeesTab({ employees, persistEmployees }) {
 }
 
 function ScheduleEditor({ employee, onSave, onCancel }) {
-  const initial = employee.schedule || { entrada: "08:00", saida: "17:00", days: [1, 2, 3, 4, 5, 6], tolerance: 10 };
-  const [entrada, setEntrada] = useState(initial.entrada);
-  const [saida, setSaida] = useState(initial.saida);
-  const [days, setDays] = useState(initial.days);
-  const [tolerance, setTolerance] = useState(initial.tolerance ?? 10);
+  const initialNorm = normalizeSchedule(employee.schedule);
+  const [perDay, setPerDay] = useState(initialNorm?.perDay || {});
+  const [tolerance, setTolerance] = useState(initialNorm?.tolerance ?? 10);
 
-  const toggleDay = (d) => setDays(prev => prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d].sort());
+  const toggleDay = (d) => {
+    setPerDay(prev => {
+      if (prev[d]) {
+        const next = { ...prev };
+        delete next[d];
+        return next;
+      }
+      return { ...prev, [d]: { entrada: "08:00", saida: "17:00" } };
+    });
+  };
+  const updateDay = (d, field, value) => {
+    setPerDay(prev => ({ ...prev, [d]: { ...prev[d], [field]: value } }));
+  };
+  const copyToAll = (d) => {
+    const src = perDay[d];
+    if (!src) return;
+    setPerDay(prev => {
+      const next = { ...prev };
+      WEEK_ORDER.forEach(day => { if (next[day]) next[day] = { entrada: src.entrada, saida: src.saida }; });
+      return next;
+    });
+  };
 
   return (
     <div style={{ padding: "0 14px 14px 14px", display: "flex", flexDirection: "column", gap: 10, background: COLORS.surfaceRaised }}>
-      <div style={{ display: "flex", gap: 8 }}>
-        <div style={{ flex: 1 }}>
-          <div style={fieldLabel}>Entrada</div>
-          <input type="time" value={entrada} onChange={e => setEntrada(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
-        </div>
-        <div style={{ flex: 1 }}>
-          <div style={fieldLabel}>Saída</div>
-          <input type="time" value={saida} onChange={e => setSaida(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
-        </div>
-        <div style={{ width: 90 }}>
-          <div style={fieldLabel}>Tolerância</div>
-          <input type="number" value={tolerance} onChange={e => setTolerance(Number(e.target.value) || 0)} style={{ ...selectStyle, width: "100%" }} />
-        </div>
+      <div style={{ width: 110 }}>
+        <div style={fieldLabel}>Tolerância (min)</div>
+        <input type="number" value={tolerance} onChange={e => setTolerance(Number(e.target.value) || 0)} style={{ ...selectStyle, width: "100%" }} />
       </div>
-      <div>
-        <div style={fieldLabel}>Dias de trabalho</div>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {WEEKDAYS.map((label, d) => (
-            <button key={d} onClick={() => toggleDay(d)} style={{
-              width: 40, height: 32, borderRadius: 7, fontSize: 12, fontWeight: 600,
-              background: days.includes(d) ? COLORS.amber : COLORS.surface,
-              color: days.includes(d) ? "#1A1400" : COLORS.textDim,
-              border: `1px solid ${days.includes(d) ? COLORS.amber : COLORS.border}`,
-            }}>{label}</button>
-          ))}
-        </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {WEEK_ORDER.map(d => {
+          const info = perDay[d];
+          return (
+            <div key={d} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={() => toggleDay(d)} style={{
+                width: 44, height: 32, flexShrink: 0, borderRadius: 7, fontSize: 12, fontWeight: 600,
+                background: info ? COLORS.amber : COLORS.surface,
+                color: info ? "#1A1400" : COLORS.textDim,
+                border: `1px solid ${info ? COLORS.amber : COLORS.border}`,
+              }}>{WEEKDAYS[d]}</button>
+              {info ? (
+                <>
+                  <input type="time" value={info.entrada} onChange={e => updateDay(d, "entrada", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                  <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+                  <input type="time" value={info.saida} onChange={e => updateDay(d, "saida", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                  <button onClick={() => copyToAll(d)} title="Copiar este horário para todos os dias marcados" style={{ background: "none", border: "none", color: COLORS.textDim, fontSize: 11, padding: 4 }}>
+                    Copiar p/ todos
+                  </button>
+                </>
+              ) : (
+                <span style={{ color: COLORS.textDim, fontSize: 12 }}>Folga</span>
+              )}
+            </div>
+          );
+        })}
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
-        <button onClick={() => onSave({ entrada, saida, days, tolerance })} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar horário</button>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button onClick={() => onSave({ perDay, tolerance })} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar horário</button>
         <button onClick={onCancel} style={ghostBtnStyle}>Cancelar</button>
       </div>
       <div style={{ color: COLORS.textDim, fontSize: 11 }}>Tolerância: minutos de atraso/antecipação aceitos antes de marcar como fora do horário.</div>
