@@ -109,6 +109,28 @@ function getScheduleStatus(punch, employee) {
   }
 }
 
+// Verifica se o horário atual exige confirmação antes de bater o ponto
+// (chegou cedo demais na entrada, ou está saindo antes da hora)
+function checkTimingIssue(employee, action) {
+  const sch = employee?.schedule;
+  if (!sch || !sch.days || sch.days.length === 0) return null;
+  const now = new Date();
+  const day = now.getDay();
+  if (!sch.days.includes(day)) return null;
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  const tol = sch.tolerance ?? 10;
+  if (action === "entrada") {
+    const expected = timeToMinutes(sch.entrada);
+    if (expected == null) return null;
+    if (nowMin < expected - tol) return { type: "early_entry", expected: sch.entrada, diff: expected - nowMin };
+  } else {
+    const expected = timeToMinutes(sch.saida);
+    if (expected == null) return null;
+    if (nowMin < expected - tol) return { type: "early_exit", expected: sch.saida, diff: expected - nowMin };
+  }
+  return null;
+}
+
 // ---------- Geo / image helpers ----------
 function getLocation(timeoutMs = 6000) {
   return new Promise((resolve) => {
@@ -338,6 +360,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   const [feedback, setFeedback] = useState(null);
   const [error, setError] = useState(null);
   const [capturing, setCapturing] = useState(false);
+  const [confirmState, setConfirmState] = useState(null); // { emp, nextAction, type, expected, diff }
   const videoRef = useRef(null);
 
   const storeEmployees = useMemo(() => employees.filter(e => e.store === store && e.active !== false), [employees, store]);
@@ -356,10 +379,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   };
   const handleClear = () => { setPin(""); setError(null); };
 
-  const submitPin = async (fullPin) => {
-    const emp = storeEmployees.find(e => e.pin === fullPin);
-    if (!emp) { setError("PIN não encontrado nesta loja."); setPin(""); return; }
-
+  const finalizePunch = async (emp, nextAction, override) => {
     setCapturing(true);
     const [photo, loc] = await Promise.all([
       captureSelfie(videoRef.current),
@@ -371,12 +391,11 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     const distance = coords && loc ? haversineMeters(coords, loc) : null;
     const outOfRange = distance != null && coords.radius ? distance > coords.radius : false;
 
-    const last = lastActionFor(emp.id);
-    const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
     const record = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       employeeId: emp.id, employeeName: emp.name, store, action: nextAction, at: new Date().toISOString(),
       photo: photo || null, location: loc || null, distance, outOfRange,
+      earlyOverride: override || null,
     };
     await persistPunches([...punches, record]);
     setFeedback({ name: emp.name, action: nextAction, time: new Date(), photo, hasLocation: !!loc, outOfRange });
@@ -384,11 +403,71 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     setTimeout(() => setFeedback(null), 3200);
   };
 
+  const submitPin = async (fullPin) => {
+    const emp = storeEmployees.find(e => e.pin === fullPin);
+    if (!emp) { setError("PIN não encontrado nesta loja."); setPin(""); return; }
+
+    const last = lastActionFor(emp.id);
+    const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
+    const issue = checkTimingIssue(emp, nextAction);
+    if (issue) {
+      setConfirmState({ emp, nextAction, ...issue });
+      setPin("");
+      return;
+    }
+    setPin("");
+    await finalizePunch(emp, nextAction, null);
+  };
+
+  const confirmEarly = async () => {
+    const { emp, nextAction, type } = confirmState;
+    setConfirmState(null);
+    await finalizePunch(emp, nextAction, type === "early_entry" ? "hora_extra_autorizada" : "saida_antecipada_confirmada");
+  };
+  const cancelEarly = () => setConfirmState(null);
+
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
       <video ref={videoRef} muted playsInline style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
 
-      {capturing ? (
+      {confirmState ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            textAlign: "center", animation: "popIn 0.25s ease-out", background: COLORS.surface,
+            border: `1px solid ${COLORS.amber}`, borderRadius: 20, padding: "36px 30px", width: "100%", maxWidth: 360,
+          }}>
+            <AlertCircle size={36} color={COLORS.amber} style={{ marginBottom: 14 }} />
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, marginBottom: 8 }}>{confirmState.emp.name}</div>
+            {confirmState.type === "early_entry" ? (
+              <>
+                <div style={{ fontSize: 14, marginBottom: 6 }}>Ainda é muito cedo para bater o ponto.</div>
+                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+                  Sua entrada é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Você tem autorização para hora extra?
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button onClick={confirmEarly} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+                    Sim, tenho autorização
+                  </button>
+                  <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Não, vou aguardar</button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 14, marginBottom: 6 }}>Você está saindo antes do horário.</div>
+                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+                  Sua saída é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Confirma a saída antecipada?
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button onClick={confirmEarly} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+                    Sim, confirmar saída
+                  </button>
+                  <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Não, continuar trabalhando</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      ) : capturing ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
           <div style={{ animation: "pulse 1s ease-in-out infinite", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
             <Camera size={30} color={COLORS.amber} />
@@ -769,7 +848,11 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
                   {STORES.find(s => s.id === p.store)?.label} · {p.action === "entrada" ? "Entrada" : "Saída"} · {fmtDate(new Date(p.at))}
                 </div>
                 {status && (
-                  <div style={{ fontSize: 11, color: status.color, marginTop: 2, fontWeight: 600 }}>{status.label}</div>
+                  <div style={{ fontSize: 11, color: status.color, marginTop: 2, fontWeight: 600 }}>
+                    {status.label}
+                    {p.earlyOverride === "hora_extra_autorizada" && " · Hora extra autorizada pelo funcionário"}
+                    {p.earlyOverride === "saida_antecipada_confirmada" && " · Confirmado pelo funcionário"}
+                  </div>
                 )}
               </div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 15 }}>{fmtTime(new Date(p.at))}</div>
