@@ -345,6 +345,7 @@ export default function App() {
 
   const persistEmployees = useCallback(async (next) => { setEmployees(next); await saveJSON(EMP_KEY, next); }, []);
   const persistPunches = useCallback(async (next) => { setPunches(next); await saveJSON(PUNCH_KEY, next); }, []);
+  const fetchLatestPunches = useCallback(async () => await loadJSON(PUNCH_KEY, []), []);
   const persistRequests = useCallback(async (next) => { setRequests(next); await saveJSON(REQUEST_KEY, next); }, []);
   const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
   const persistAdminPin = useCallback(async (pin) => { setAdminPin(pin); await saveJSON(ADMIN_PIN_KEY, pin); }, []);
@@ -379,7 +380,7 @@ export default function App() {
         {view === "admin" && (
           <AdminPanel
             employees={employees} persistEmployees={persistEmployees}
-            punches={punches} persistPunches={persistPunches}
+            punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches}
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
             adminPin={adminPin} persistAdminPin={persistAdminPin}
@@ -853,7 +854,7 @@ function AdminLogin({ adminPin, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, requests, persistRequests, leaves, persistLeaves, adminPin, persistAdminPin, storeCoords, persistStoreCoords, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminPin, persistAdminPin, storeCoords, persistStoreCoords, onExit }) {
   const [tab, setTab] = useState("records");
   const pendingCount = requests.filter(r => r.status === "pendente").length;
   const todayKey = fmtDateKey(new Date());
@@ -874,7 +875,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, requ
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
-      {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} />}
+      {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} />}
       {tab === "settings" && <SettingsTab adminPin={adminPin} persistAdminPin={persistAdminPin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
     </div>
@@ -1250,7 +1251,7 @@ function LeavesTab({ employees, leaves, persistLeaves }) {
 }
 
 // ---- Importar do Pontomais ----
-function ImportTab({ employees, punches, persistPunches }) {
+function ImportTab({ employees, punches, persistPunches, fetchLatestPunches }) {
   const [parsed, setParsed] = useState(null); // { byName }
   const [mapping, setMapping] = useState({}); // name -> employeeId | ""
   const [fileError, setFileError] = useState("");
@@ -1267,10 +1268,14 @@ function ImportTab({ employees, punches, persistPunches }) {
     const out = parsePontomaisCSV(text);
     if (out.error) { setFileError(out.error); setParsed(null); return; }
     setParsed(out);
+    const norm = (s) => s.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
     const initialMapping = {};
     Object.keys(out.byName).forEach(name => {
-      const exact = employees.find(e => e.name.trim().toLowerCase() === name.trim().toLowerCase());
-      initialMapping[name] = exact ? exact.id : "";
+      const target = norm(name);
+      const exact = employees.find(e => norm(e.name) === target);
+      const contains = !exact && employees.find(e => norm(e.name).includes(target) || target.includes(norm(e.name)));
+      const match = exact || contains;
+      initialMapping[name] = match ? match.id : "";
     });
     setMapping(initialMapping);
   };
@@ -1278,8 +1283,11 @@ function ImportTab({ employees, punches, persistPunches }) {
   const runImport = async () => {
     if (!parsed) return;
     setImporting(true);
+    // Busca a versão mais atual salva no banco antes de mesclar, para não sobrescrever
+    // pontos batidos em outros dispositivos nesse meio-tempo.
+    const latestPunches = await fetchLatestPunches();
     let newPunches = [];
-    const existingKeys = new Set(punches.filter(p => p.importedFrom === "pontomais").map(p => `${p.employeeId}|${p.at}`));
+    const existingKeys = new Set(latestPunches.filter(p => p.importedFrom === "pontomais").map(p => `${p.employeeId}|${p.at}`));
 
     Object.entries(parsed.byName).forEach(([name, dates]) => {
       const empId = mapping[name];
@@ -1301,7 +1309,7 @@ function ImportTab({ employees, punches, persistPunches }) {
       });
     });
 
-    await persistPunches([...punches, ...newPunches]);
+    await persistPunches([...latestPunches, ...newPunches]);
     setImporting(false);
     setResult({ count: newPunches.length });
   };
@@ -1332,10 +1340,16 @@ function ImportTab({ employees, punches, persistPunches }) {
           {Object.entries(parsed.byName).map(([name, dates]) => (
             <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
               <div style={{ flex: 1, minWidth: 160 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{name}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                  {name}
+                  {!mapping[name] && <AlertCircle size={13} color={COLORS.amber} />}
+                </div>
                 <div style={{ fontSize: 11, color: COLORS.textDim }}>{dates.length} batidas</div>
               </div>
-              <select value={mapping[name] || ""} onChange={e => setMapping(m => ({ ...m, [name]: e.target.value }))} style={selectStyle}>
+              <select value={mapping[name] || ""} onChange={e => setMapping(m => ({ ...m, [name]: e.target.value }))} style={{
+                ...selectStyle,
+                border: `1px solid ${mapping[name] ? COLORS.border : COLORS.amber}`,
+              }}>
                 <option value="">Não importar</option>
                 {STORES.map(s => (
                   <optgroup key={s.id} label={s.label}>
