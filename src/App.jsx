@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import {
   Clock, Check, X, Users, ListChecks, Lock, Plus, Trash2, Download, ChevronLeft,
-  AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays
+  AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet
 } from "lucide-react";
 
 // ---------- Storage helpers ----------
@@ -122,6 +122,47 @@ function formatScheduleSummary(schedule) {
   return segments.length ? segments.join(" · ") : null;
 }
 
+// Calcula o fechamento mensal (horas, atrasos, faltas e ausências) por funcionário
+function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey) {
+  const [y, m] = monthKey.split("-").map(Number);
+  const lastDay = new Date(y, m, 0).getDate();
+  const monthStart = `${monthKey}-01`;
+  const monthEnd = `${monthKey}-${pad2(lastDay)}`;
+
+  const empList = employees.filter(e => storeFilter === "all" || e.store === storeFilter);
+
+  return empList.map(emp => {
+    const empPunches = punches
+      .filter(p => p.employeeId === emp.id && p.at.slice(0, 7) === monthKey)
+      .sort((a, b) => new Date(a.at) - new Date(b.at));
+
+    let totalMin = 0;
+    const daysWorked = new Set();
+    let lateCount = 0, earlyLeaveCount = 0;
+    for (let i = 0; i < empPunches.length; i++) {
+      const status = getScheduleStatus(empPunches[i], emp);
+      if (status?.label?.startsWith("Atraso")) lateCount++;
+      if (status?.label?.startsWith("Saída antecipada")) earlyLeaveCount++;
+      if (empPunches[i].action === "entrada" && empPunches[i + 1]?.action === "saida") {
+        totalMin += (new Date(empPunches[i + 1].at) - new Date(empPunches[i].at)) / 60000;
+        daysWorked.add(fmtDateKey(new Date(empPunches[i].at)));
+        i++;
+      }
+    }
+
+    const leaveDaysByType = {};
+    leaves.filter(l => l.employeeId === emp.id).forEach(l => {
+      if (l.endDate < monthStart || l.startDate > monthEnd) return;
+      const start = l.startDate < monthStart ? monthStart : l.startDate;
+      const end = l.endDate > monthEnd ? monthEnd : l.endDate;
+      const days = Math.round((new Date(end + "T00:00:00") - new Date(start + "T00:00:00")) / 86400000) + 1;
+      leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
+    });
+
+    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType };
+  });
+}
+
 function getScheduleStatus(punch, employee) {
   const norm = normalizeSchedule(employee?.schedule);
   if (!norm) return null;
@@ -161,6 +202,7 @@ function checkTimingIssue(employee, action) {
     const expected = timeToMinutes(info.entrada);
     if (expected == null) return null;
     if (nowMin < expected - tol) return { type: "early_entry", expected: info.entrada, diff: expected - nowMin };
+    if (nowMin > expected + tol) return { type: "late_entry", expected: info.entrada, diff: nowMin - expected };
   } else {
     const expected = timeToMinutes(info.saida);
     if (expected == null) return null;
@@ -460,7 +502,12 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   const confirmEarly = async () => {
     const { emp, nextAction, type } = confirmState;
     setConfirmState(null);
-    await finalizePunch(emp, nextAction, type === "early_entry" ? "hora_extra_autorizada" : "saida_antecipada_confirmada");
+    const overrideMap = {
+      early_entry: "hora_extra_autorizada",
+      late_entry: "entrada_atrasada_confirmada",
+      early_exit: "saida_antecipada_confirmada",
+    };
+    await finalizePunch(emp, nextAction, overrideMap[type] || null);
   };
   const cancelEarly = () => setConfirmState(null);
 
@@ -487,6 +534,19 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
                     Sim, tenho autorização
                   </button>
                   <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Não, vou aguardar</button>
+                </div>
+              </>
+            ) : confirmState.type === "late_entry" ? (
+              <>
+                <div style={{ fontSize: 14, marginBottom: 6 }}>Você está entrando bem depois do horário.</div>
+                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+                  Sua entrada era às <b style={{ color: COLORS.text }}>{confirmState.expected}</b> ({confirmState.diff}min de atraso). Confirma essa entrada?
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <button onClick={confirmEarly} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+                    Sim, confirmar entrada
+                  </button>
+                  <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Cancelar</button>
                 </div>
               </>
             ) : (
@@ -774,12 +834,14 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, requ
         <TabBtn icon={ListChecks} label="Registros" active={tab === "records"} onClick={() => setTab("records")} />
         <TabBtn icon={Inbox} label="Solicitações" badge={pendingCount} active={tab === "requests"} onClick={() => setTab("requests")} />
         <TabBtn icon={CalendarDays} label="Ausências" badge={onLeaveToday} active={tab === "leaves"} onClick={() => setTab("leaves")} />
+        <TabBtn icon={FileSpreadsheet} label="Fechamento" active={tab === "closing"} onClick={() => setTab("closing")} />
         <TabBtn icon={Users} label="Funcionários" active={tab === "employees"} onClick={() => setTab("employees")} />
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
       {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} />}
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
+      {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} />}
       {tab === "settings" && <SettingsTab adminPin={adminPin} persistAdminPin={persistAdminPin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
     </div>
@@ -889,6 +951,7 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
                   <div style={{ fontSize: 11, color: status.color, marginTop: 2, fontWeight: 600 }}>
                     {status.label}
                     {p.earlyOverride === "hora_extra_autorizada" && " · Hora extra autorizada pelo funcionário"}
+                    {p.earlyOverride === "entrada_atrasada_confirmada" && " · Entrada atrasada confirmada pelo funcionário"}
                     {p.earlyOverride === "saida_antecipada_confirmada" && " · Confirmado pelo funcionário"}
                   </div>
                 )}
@@ -1148,6 +1211,95 @@ function LeavesTab({ employees, leaves, persistLeaves }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ---- Fechamento mensal (para contabilidade) ----
+function ClosingTab({ employees, punches, leaves }) {
+  const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
+  const [storeFilter, setStoreFilter] = useState("all");
+
+  const summary = useMemo(() => computeMonthlySummary(punches, leaves, employees, storeFilter, month), [punches, leaves, employees, storeFilter, month]);
+
+  const monthLabel = useMemo(() => {
+    const [y, m] = month.split("-").map(Number);
+    return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+  }, [month]);
+
+  const exportCSV = () => {
+    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Atrasos,Saídas antecipadas,Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
+    const body = summary.map(s => {
+      const l = s.leaveDaysByType;
+      return [
+        s.emp.name,
+        STORES.find(st => st.id === s.emp.store)?.label || s.emp.store,
+        s.daysWorked,
+        fmtDuration(s.totalMin).replace("h", ":").padEnd(5, "0"),
+        s.lateCount,
+        s.earlyLeaveCount,
+        l.ferias || 0,
+        l.atestado || 0,
+        l.maternidade || 0,
+        l.paternidade || 0,
+        l.outro || 0,
+      ].join(",");
+    }).join("\n");
+    const blob = new Blob([header + body], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `fechamento-${month}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={selectStyle} />
+        <select value={storeFilter} onChange={e => setStoreFilter(e.target.value)} style={selectStyle}>
+          <option value="all">Todas as lojas</option>
+          {STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+        <button onClick={exportCSV} style={{ ...ghostBtnStyle, marginLeft: "auto", color: COLORS.amber, borderColor: COLORS.amberDim }}>
+          <Download size={14} /> Exportar CSV para contabilidade
+        </button>
+      </div>
+      <div style={{ color: COLORS.textDim, fontSize: 12, textTransform: "capitalize" }}>{monthLabel}</div>
+
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto" }}>
+        {summary.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum funcionário cadastrado.</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.border}`, textAlign: "left" }}>
+                {["Funcionário", "Dias", "Horas", "Atrasos", "Saída ant.", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
+                  <th key={h} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map(s => (
+                <tr key={s.emp.id} style={{ borderTop: `1px solid ${COLORS.border}` }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.emp.name}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.daysWorked}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
+                  <td style={{ padding: "8px 10px", color: s.lateCount ? COLORS.red : COLORS.textDim }}>{s.lateCount}</td>
+                  <td style={{ padding: "8px 10px", color: s.earlyLeaveCount ? COLORS.amber : COLORS.textDim }}>{s.earlyLeaveCount}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.ferias || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.atestado || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.maternidade || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.paternidade || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.outro || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        O CSV pode ser aberto direto no Excel e enviado por e-mail ou WhatsApp para a contabilidade.
       </div>
     </div>
   );
