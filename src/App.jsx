@@ -1315,7 +1315,7 @@ function ImportTab({ employees, punches, persistPunches }) {
         <div style={{ fontSize: 12, color: COLORS.textDim }}>
           Exporte o relatório "Registros de Ponto" do Pontomais em CSV e envie o arquivo aqui.
         </div>
-        <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{ display: "none" }} />
+        <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain,application/vnd.ms-excel" onChange={handleFile} style={{ display: "none" }} />
         <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
           <Upload size={14} /> Selecionar arquivo CSV
         </button>
