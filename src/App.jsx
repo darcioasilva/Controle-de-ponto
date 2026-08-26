@@ -407,7 +407,7 @@ function TopBar({ store, setStore, view, setView }) {
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Clock size={20} color={COLORS.amber} />
-        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, letterSpacing: 0.2 }}>Ponto</span>
+        <span style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 18, letterSpacing: 0.2 }}>Controle de Ponto</span>
       </div>
       {(view === "punch" || view === "request") && (
         <div style={{ display: "flex", gap: 6, background: COLORS.surface, padding: 4, borderRadius: 10, border: `1px solid ${COLORS.border}` }}>
