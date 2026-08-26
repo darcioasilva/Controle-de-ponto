@@ -170,10 +170,16 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
     let totalMin = 0;
     const daysWorked = new Set();
     let lateCount = 0, earlyLeaveCount = 0;
+    let prevDateKey = null, dayIdx = 0;
     for (let i = 0; i < empPunches.length; i++) {
-      const status = getScheduleStatus(empPunches[i], emp);
+      const dateKey = fmtDateKey(new Date(empPunches[i].at));
+      dayIdx = dateKey === prevDateKey ? dayIdx + 1 : 0;
+      prevDateKey = dateKey;
+      const status = getScheduleStatus(empPunches[i], emp, dayIdx);
       if (status?.label?.startsWith("Atraso")) lateCount++;
       if (status?.label?.startsWith("Saída antecipada")) earlyLeaveCount++;
+    }
+    for (let i = 0; i < empPunches.length; i++) {
       if (empPunches[i].action === "entrada" && empPunches[i + 1]?.action === "saida") {
         totalMin += (new Date(empPunches[i + 1].at) - new Date(empPunches[i].at)) / 60000;
         daysWorked.add(fmtDateKey(new Date(empPunches[i].at)));
@@ -194,13 +200,23 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
   });
 }
 
-function getScheduleStatus(punch, employee) {
+// Conta quantos pontos esse funcionário já bateu HOJE (antes deste novo ponto),
+// usado para saber se é a entrada do dia, a saída/volta do almoço, ou a saída final.
+function countTodayPunches(punches, employeeId) {
+  const todayKey = fmtDateKey(new Date());
+  return punches.filter(p => p.employeeId === employeeId && fmtDateKey(new Date(p.at)) === todayKey).length;
+}
+
+function getScheduleStatus(punch, employee, dayIdx = 0) {
   const norm = normalizeSchedule(employee?.schedule);
   if (!norm) return null;
   const d = new Date(punch.at);
   const day = d.getDay();
   const info = norm.perDay[day];
   if (!info) return { label: "Fora da escala", color: COLORS.amber };
+  const hasLunch = !!info.lunch;
+  // Pontos de almoço (índices 1 e 2 do dia, quando há intervalo) não são avaliados
+  if (hasLunch && (dayIdx === 1 || dayIdx === 2)) return { label: "Intervalo", color: COLORS.textDim };
   const punchMin = d.getHours() * 60 + d.getMinutes();
   const tol = norm.tolerance ?? 10;
   if (punch.action === "entrada") {
@@ -219,14 +235,18 @@ function getScheduleStatus(punch, employee) {
 }
 
 // Verifica se o horário atual exige confirmação antes de bater o ponto
-// (chegou cedo demais na entrada, ou está saindo antes da hora)
-function checkTimingIssue(employee, action) {
+// (chegou cedo demais na entrada, ou está saindo antes da hora).
+// dayIdx = quantos pontos esse funcionário já bateu hoje (0 = este é o 1º do dia).
+function checkTimingIssue(employee, action, dayIdx = 0) {
   const norm = normalizeSchedule(employee?.schedule);
   if (!norm) return null;
   const now = new Date();
   const day = now.getDay();
   const info = norm.perDay[day];
   if (!info) return null;
+  const hasLunch = !!info.lunch;
+  // Pontos de ida/volta do almoço não são checados contra o horário de entrada/saída do dia
+  if (hasLunch && (dayIdx === 1 || dayIdx === 2)) return null;
   const nowMin = now.getHours() * 60 + now.getMinutes();
   const tol = norm.tolerance ?? 10;
   if (action === "entrada") {
@@ -521,7 +541,8 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
 
     const last = lastActionFor(emp.id);
     const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
-    const issue = checkTimingIssue(emp, nextAction);
+    const dayIdx = countTodayPunches(punches, emp.id);
+    const issue = checkTimingIssue(emp, nextAction, dayIdx);
     if (issue) {
       setConfirmState({ emp, nextAction, ...issue });
       setPin("");
@@ -963,7 +984,12 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
           <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum registro para esse filtro.</div>
         ) : rows.map((p, i) => {
           const emp = employees.find(e => e.id === p.employeeId);
-          const status = getScheduleStatus(p, emp);
+          const dayKey = fmtDateKey(new Date(p.at));
+          const dayIdx = punches
+            .filter(pp => pp.employeeId === p.employeeId && fmtDateKey(new Date(pp.at)) === dayKey)
+            .sort((a, b) => new Date(a.at) - new Date(b.at))
+            .findIndex(pp => pp.id === p.id);
+          const status = getScheduleStatus(p, emp, dayIdx);
           return (
           <div key={p.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", cursor: p.photo || p.location ? "pointer" : "default" }}
@@ -1625,18 +1651,21 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
         delete next[d];
         return next;
       }
-      return { ...prev, [d]: { entrada: "08:00", saida: "17:00" } };
+      return { ...prev, [d]: { entrada: "08:00", saida: "17:00", lunch: false, lunchMin: 30 } };
     });
   };
   const updateDay = (d, field, value) => {
     setPerDay(prev => ({ ...prev, [d]: { ...prev[d], [field]: value } }));
+  };
+  const toggleLunch = (d) => {
+    setPerDay(prev => ({ ...prev, [d]: { ...prev[d], lunch: !prev[d].lunch, lunchMin: prev[d].lunchMin ?? 30 } }));
   };
   const copyToAll = (d) => {
     const src = perDay[d];
     if (!src) return;
     setPerDay(prev => {
       const next = { ...prev };
-      WEEK_ORDER.forEach(day => { if (next[day]) next[day] = { entrada: src.entrada, saida: src.saida }; });
+      WEEK_ORDER.forEach(day => { if (next[day]) next[day] = { ...src }; });
       return next;
     });
   };
@@ -1648,28 +1677,42 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
         <input type="number" value={tolerance} onChange={e => setTolerance(Number(e.target.value) || 0)} style={{ ...selectStyle, width: "100%" }} />
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
         {WEEK_ORDER.map(d => {
           const info = perDay[d];
           return (
-            <div key={d} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <button onClick={() => toggleDay(d)} style={{
-                width: 44, height: 32, flexShrink: 0, borderRadius: 7, fontSize: 12, fontWeight: 600,
-                background: info ? COLORS.amber : COLORS.surface,
-                color: info ? "#1A1400" : COLORS.textDim,
-                border: `1px solid ${info ? COLORS.amber : COLORS.border}`,
-              }}>{WEEKDAYS[d]}</button>
-              {info ? (
-                <>
-                  <input type="time" value={info.entrada} onChange={e => updateDay(d, "entrada", e.target.value)} style={{ ...selectStyle, width: 100 }} />
-                  <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
-                  <input type="time" value={info.saida} onChange={e => updateDay(d, "saida", e.target.value)} style={{ ...selectStyle, width: 100 }} />
-                  <button onClick={() => copyToAll(d)} title="Copiar este horário para todos os dias marcados" style={{ background: "none", border: "none", color: COLORS.textDim, fontSize: 11, padding: 4 }}>
-                    Copiar p/ todos
-                  </button>
-                </>
-              ) : (
-                <span style={{ color: COLORS.textDim, fontSize: 12 }}>Folga</span>
+            <div key={d} style={{ display: "flex", flexDirection: "column", gap: 6, paddingBottom: 6, borderBottom: `1px solid ${COLORS.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button onClick={() => toggleDay(d)} style={{
+                  width: 44, height: 32, flexShrink: 0, borderRadius: 7, fontSize: 12, fontWeight: 600,
+                  background: info ? COLORS.amber : COLORS.surface,
+                  color: info ? "#1A1400" : COLORS.textDim,
+                  border: `1px solid ${info ? COLORS.amber : COLORS.border}`,
+                }}>{WEEKDAYS[d]}</button>
+                {info ? (
+                  <>
+                    <input type="time" value={info.entrada} onChange={e => updateDay(d, "entrada", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                    <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+                    <input type="time" value={info.saida} onChange={e => updateDay(d, "saida", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                    <button onClick={() => copyToAll(d)} title="Copiar este horário para todos os dias marcados" style={{ background: "none", border: "none", color: COLORS.textDim, fontSize: 11, padding: 4 }}>
+                      Copiar p/ todos
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ color: COLORS.textDim, fontSize: 12 }}>Folga</span>
+                )}
+              </div>
+              {info && (
+                <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 52, fontSize: 12, color: COLORS.textDim }}>
+                  <input type="checkbox" checked={!!info.lunch} onChange={() => toggleLunch(d)} />
+                  Tem intervalo de almoço
+                  {info.lunch && (
+                    <>
+                      <input type="number" value={info.lunchMin ?? 30} onChange={e => updateDay(d, "lunchMin", Number(e.target.value) || 0)} style={{ ...selectStyle, width: 60 }} />
+                      min (duração de referência)
+                    </>
+                  )}
+                </label>
               )}
             </div>
           );
