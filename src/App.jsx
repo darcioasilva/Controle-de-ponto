@@ -1256,12 +1256,13 @@ function ImportTab({ employees, punches, persistPunches }) {
   const [fileError, setFileError] = useState("");
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
+  const [fileName, setFileName] = useState("");
   const fileRef = useRef(null);
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setFileError(""); setResult(null);
+    setFileError(""); setResult(null); setFileName(file.name);
     const text = await file.text();
     const out = parsePontomaisCSV(text);
     if (out.error) { setFileError(out.error); setParsed(null); return; }
@@ -1315,10 +1316,11 @@ function ImportTab({ employees, punches, persistPunches }) {
         <div style={{ fontSize: 12, color: COLORS.textDim }}>
           Exporte o relatório "Registros de Ponto" do Pontomais em CSV e envie o arquivo aqui.
         </div>
-        <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain,application/vnd.ms-excel" onChange={handleFile} style={{ display: "none" }} />
+        <input ref={fileRef} type="file" onChange={handleFile} style={{ display: "none" }} />
         <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
           <Upload size={14} /> Selecionar arquivo CSV
         </button>
+        {fileName && <div style={{ fontSize: 12, color: COLORS.textDim }}>Arquivo selecionado: {fileName}</div>}
         {fileError && <div style={{ color: COLORS.red, fontSize: 12 }}>{fileError}</div>}
       </div>
 
