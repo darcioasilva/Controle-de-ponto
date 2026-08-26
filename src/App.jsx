@@ -1375,6 +1375,12 @@ function ClosingTab({ employees, punches, leaves }) {
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
   const [storeFilter, setStoreFilter] = useState("all");
 
+  const importedTotal = useMemo(() => punches.filter(p => p.importedFrom === "pontomais").length, [punches]);
+  const importedThisMonth = useMemo(
+    () => punches.filter(p => p.importedFrom === "pontomais" && p.at.slice(0, 7) === month).length,
+    [punches, month]
+  );
+
   const summary = useMemo(() => computeMonthlySummary(punches, leaves, employees, storeFilter, month), [punches, leaves, employees, storeFilter, month]);
 
   const monthLabel = useMemo(() => {
@@ -1420,6 +1426,9 @@ function ClosingTab({ employees, punches, leaves }) {
         </button>
       </div>
       <div style={{ color: COLORS.textDim, fontSize: 12, textTransform: "capitalize" }}>{monthLabel}</div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        {importedTotal} registros importados do Pontomais no total ({importedThisMonth} neste mês).
+      </div>
 
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto" }}>
         {summary.length === 0 ? (
