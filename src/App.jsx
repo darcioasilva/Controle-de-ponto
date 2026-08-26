@@ -1258,7 +1258,21 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches }) {
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
   const [fileName, setFileName] = useState("");
+  const [clearing, setClearing] = useState(false);
+  const [clearResult, setClearResult] = useState(null);
   const fileRef = useRef(null);
+
+  const importedTotal = useMemo(() => punches.filter(p => p.importedFrom === "pontomais").length, [punches]);
+
+  const clearPreviousImports = async () => {
+    if (!window.confirm(`Isso vai remover todos os ${importedTotal} registros já importados do Pontomais (não afeta pontos batidos normalmente no app). Confirma?`)) return;
+    setClearing(true);
+    const latest = await fetchLatestPunches();
+    const kept = latest.filter(p => p.importedFrom !== "pontomais");
+    await persistPunches(kept);
+    setClearing(false);
+    setClearResult(latest.length - kept.length);
+  };
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
@@ -1324,6 +1338,19 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches }) {
         <div style={{ fontSize: 12, color: COLORS.textDim }}>
           Exporte o relatório "Registros de Ponto" do Pontomais em CSV e envie o arquivo aqui.
         </div>
+        {importedTotal > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: COLORS.surfaceRaised, borderRadius: 8, padding: "8px 10px" }}>
+            <div style={{ fontSize: 12, color: COLORS.textDim, flex: 1 }}>
+              Já existem {importedTotal} registros importados do Pontomais salvos.
+            </div>
+            <button onClick={clearPreviousImports} disabled={clearing} style={{ ...ghostBtnStyle, color: COLORS.red, borderColor: COLORS.red, fontSize: 12, padding: "6px 10px" }}>
+              {clearing ? "Removendo…" : "Remover importações anteriores"}
+            </button>
+          </div>
+        )}
+        {clearResult != null && (
+          <div style={{ color: COLORS.teal, fontSize: 12 }}>{clearResult} registros removidos. Já pode importar de novo com segurança.</div>
+        )}
         <input ref={fileRef} type="file" onChange={handleFile} style={{ display: "none" }} />
         <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
           <Upload size={14} /> Selecionar arquivo CSV
