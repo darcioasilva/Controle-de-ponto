@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import Papa from "papaparse";
 import {
   Clock, Check, X, Users, ListChecks, Lock, Plus, Trash2, Download, ChevronLeft,
-  AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet
+  AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet, Upload
 } from "lucide-react";
 
 // ---------- Storage helpers ----------
@@ -80,6 +81,36 @@ function fmtDuration(mins) {
 
 const WEEKDAYS = ["Dom", "Seg", "Ter", "Qua", "Qui", "Sex", "Sáb"];
 const WEEK_ORDER = [1, 2, 3, 4, 5, 6, 0]; // Seg...Dom, ordem de exibição
+
+// Lê o CSV exportado do Pontomais ("Registros de Ponto") e agrupa as batidas por funcionário
+function parsePontomaisCSV(text) {
+  const result = Papa.parse(text, { skipEmptyLines: true });
+  const rows = result.data;
+  const headerIdx = rows.findIndex(r => r[0] === "Nome" && r[1] === "Data" && r[2] === "Hora");
+  if (headerIdx === -1) return { error: "Não encontrei o cabeçalho 'Nome,Data,Hora' — confere se é o relatório certo." };
+
+  const byName = {};
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row || row.length < 3) continue;
+    const [name, dataStr, horaStr] = row;
+    if (!name || !dataStr || !horaStr) continue;
+    if (name === "Resumo" || name === "Total") continue;
+    // dataStr vem como "Sáb, 02/05/2026"
+    const m = dataStr.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    const hm = horaStr.match(/^(\d{1,2}):(\d{2})/);
+    if (!m || !hm) continue;
+    const [, dd, mm, yyyy] = m;
+    const [, hh, min] = hm;
+    const dt = new Date(Number(yyyy), Number(mm) - 1, Number(dd), Number(hh), Number(min), 0, 0);
+    if (isNaN(dt.getTime())) continue;
+    byName[name] = byName[name] || [];
+    byName[name].push(dt);
+  }
+  Object.keys(byName).forEach(name => byName[name].sort((a, b) => a - b));
+  return { byName };
+}
+
 
 function timeToMinutes(t) {
   if (!t) return null;
@@ -835,6 +866,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, requ
         <TabBtn icon={Inbox} label="Solicitações" badge={pendingCount} active={tab === "requests"} onClick={() => setTab("requests")} />
         <TabBtn icon={CalendarDays} label="Ausências" badge={onLeaveToday} active={tab === "leaves"} onClick={() => setTab("leaves")} />
         <TabBtn icon={FileSpreadsheet} label="Fechamento" active={tab === "closing"} onClick={() => setTab("closing")} />
+        <TabBtn icon={Upload} label="Importar" active={tab === "import"} onClick={() => setTab("import")} />
         <TabBtn icon={Users} label="Funcionários" active={tab === "employees"} onClick={() => setTab("employees")} />
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
@@ -842,6 +874,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, requ
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
+      {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} />}
       {tab === "settings" && <SettingsTab adminPin={adminPin} persistAdminPin={persistAdminPin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
     </div>
@@ -1211,6 +1244,125 @@ function LeavesTab({ employees, leaves, persistLeaves }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+// ---- Importar do Pontomais ----
+function ImportTab({ employees, punches, persistPunches }) {
+  const [parsed, setParsed] = useState(null); // { byName }
+  const [mapping, setMapping] = useState({}); // name -> employeeId | ""
+  const [fileError, setFileError] = useState("");
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState(null);
+  const fileRef = useRef(null);
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setFileError(""); setResult(null);
+    const text = await file.text();
+    const out = parsePontomaisCSV(text);
+    if (out.error) { setFileError(out.error); setParsed(null); return; }
+    setParsed(out);
+    const initialMapping = {};
+    Object.keys(out.byName).forEach(name => {
+      const exact = employees.find(e => e.name.trim().toLowerCase() === name.trim().toLowerCase());
+      initialMapping[name] = exact ? exact.id : "";
+    });
+    setMapping(initialMapping);
+  };
+
+  const runImport = async () => {
+    if (!parsed) return;
+    setImporting(true);
+    let newPunches = [];
+    const existingKeys = new Set(punches.filter(p => p.importedFrom === "pontomais").map(p => `${p.employeeId}|${p.at}`));
+
+    Object.entries(parsed.byName).forEach(([name, dates]) => {
+      const empId = mapping[name];
+      if (!empId) return;
+      const emp = employees.find(e => e.id === empId);
+      if (!emp) return;
+      dates.forEach((dt, idx) => {
+        const action = idx % 2 === 0 ? "entrada" : "saida";
+        const at = dt.toISOString();
+        const key = `${empId}|${at}`;
+        if (existingKeys.has(key)) return;
+        existingKeys.add(key);
+        newPunches.push({
+          id: `${dt.getTime()}-${empId}-${idx}`,
+          employeeId: empId, employeeName: emp.name, store: emp.store, action, at,
+          photo: null, location: null, distance: null, outOfRange: false,
+          importedFrom: "pontomais",
+        });
+      });
+    });
+
+    await persistPunches([...punches, ...newPunches]);
+    setImporting(false);
+    setResult({ count: newPunches.length });
+  };
+
+  const mappedCount = Object.values(mapping).filter(Boolean).length;
+  const totalNames = parsed ? Object.keys(parsed.byName).length : 0;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Importar histórico do Pontomais</div>
+        <div style={{ fontSize: 12, color: COLORS.textDim }}>
+          Exporte o relatório "Registros de Ponto" do Pontomais em CSV e envie o arquivo aqui.
+        </div>
+        <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{ display: "none" }} />
+        <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
+          <Upload size={14} /> Selecionar arquivo CSV
+        </button>
+        {fileError && <div style={{ color: COLORS.red, fontSize: 12 }}>{fileError}</div>}
+      </div>
+
+      {parsed && (
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>
+            Encontrei {totalNames} funcionário(s) no arquivo — mapeie cada nome para o cadastro correspondente
+          </div>
+          {Object.entries(parsed.byName).map(([name, dates]) => (
+            <div key={name} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: 1, minWidth: 160 }}>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{name}</div>
+                <div style={{ fontSize: 11, color: COLORS.textDim }}>{dates.length} batidas</div>
+              </div>
+              <select value={mapping[name] || ""} onChange={e => setMapping(m => ({ ...m, [name]: e.target.value }))} style={selectStyle}>
+                <option value="">Não importar</option>
+                {STORES.map(s => (
+                  <optgroup key={s.id} label={s.label}>
+                    {employees.filter(e => e.store === s.id).map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+          ))}
+
+          <div style={{ color: COLORS.textDim, fontSize: 12 }}>{mappedCount} de {totalNames} serão importados.</div>
+
+          <button
+            onClick={runImport} disabled={importing || mappedCount === 0}
+            style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, opacity: importing || mappedCount === 0 ? 0.6 : 1 }}
+          >
+            {importing ? "Importando…" : "Importar registros"}
+          </button>
+
+          {result && (
+            <div style={{ color: COLORS.teal, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+              <CheckCircle2 size={15} /> {result.count} registros importados com sucesso.
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        As batidas importadas entram sem foto e sem localização (o Pontomais não exporta essas informações), mas contam normalmente nas horas trabalhadas e no fechamento mensal. Importações repetidas do mesmo arquivo não duplicam os registros.
       </div>
     </div>
   );
