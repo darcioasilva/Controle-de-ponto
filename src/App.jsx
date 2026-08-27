@@ -893,7 +893,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
       {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} />}
-      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} />}
+      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
@@ -1090,9 +1090,14 @@ function DaySummary({ punches, filterStore, filterDate }) {
 }
 
 // ---- Requests tab ----
-function RequestsTab({ requests, persistRequests, punches, persistPunches }) {
+function RequestsTab({ requests, persistRequests, punches, persistPunches, fetchLatestPunches }) {
   const [filter, setFilter] = useState("pendente");
   const [expanded, setExpanded] = useState(null);
+  const [adjustingId, setAdjustingId] = useState(null);
+  const [draftPunches, setDraftPunches] = useState([]);
+  const [newTime, setNewTime] = useState("");
+  const [newAction, setNewAction] = useState("entrada");
+  const [saving, setSaving] = useState(false);
 
   const rows = useMemo(() => requests
     .filter(r => filter === "all" || r.status === filter)
@@ -1100,6 +1105,44 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches }) {
 
   const setStatus = async (id, status, adminNote = "") => {
     await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote, resolvedAt: new Date().toISOString() } : r));
+  };
+
+  const openAdjust = (r) => {
+    const dayPunches = punches
+      .filter(p => p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date)
+      .sort((a, b) => new Date(a.at) - new Date(b.at))
+      .map(p => ({ key: p.id, time: fmtTime(new Date(p.at)).slice(0, 5), action: p.action }));
+    setDraftPunches(dayPunches);
+    setNewTime(""); setNewAction("entrada");
+    setAdjustingId(r.id);
+  };
+
+  const addDraftPunch = () => {
+    if (!newTime) return;
+    setDraftPunches(prev => [...prev, { key: `new-${Date.now()}`, time: newTime, action: newAction }].sort((a, b) => a.time.localeCompare(b.time)));
+    setNewTime("");
+  };
+  const removeDraftPunch = (key) => setDraftPunches(prev => prev.filter(p => p.key !== key));
+  const updateDraftPunch = (key, field, value) => setDraftPunches(prev => prev.map(p => p.key === key ? { ...p, [field]: value } : p));
+
+  const saveAdjustment = async (r) => {
+    setSaving(true);
+    const latest = await fetchLatestPunches();
+    const others = latest.filter(p => !(p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date));
+    const rebuilt = draftPunches
+      .filter(dp => dp.time)
+      .sort((a, b) => a.time.localeCompare(b.time))
+      .map((dp, idx) => ({
+        id: `${r.date}-${dp.time}-${r.employeeId}-${idx}`,
+        employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
+        action: dp.action, at: new Date(`${r.date}T${dp.time}:00`).toISOString(),
+        photo: null, location: null, distance: null, outOfRange: false,
+        adjustedByAdmin: true, requestId: r.id,
+      }));
+    await persistPunches([...others, ...rebuilt]);
+    await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)).`);
+    setSaving(false);
+    setAdjustingId(null);
   };
 
   return (
@@ -1118,7 +1161,9 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches }) {
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
         {rows.length === 0 ? (
           <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhuma solicitação aqui.</div>
-        ) : rows.map((r, i) => (
+        ) : rows.map((r, i) => {
+          const needsPunchEdit = r.type === "correcao" || r.type === "esqueci";
+          return (
           <div key={r.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none", padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
               <div>
@@ -1135,18 +1180,63 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches }) {
                 style={{ marginTop: 8, width: expanded === r.id ? "100%" : 90, maxHeight: expanded === r.id ? 320 : 68, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}`, cursor: "pointer" }} />
             )}
             {r.adminNote && <div style={{ fontSize: 12, color: COLORS.textDim, marginTop: 6, fontStyle: "italic" }}>Nota admin: {r.adminNote}</div>}
-            {r.status === "pendente" && (
-              <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-                <button onClick={() => setStatus(r.id, "aprovada")} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
-                  <CheckCircle2 size={13} /> Aprovar
-                </button>
+
+            {r.status === "pendente" && adjustingId !== r.id && (
+              <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
+                {needsPunchEdit ? (
+                  <button onClick={() => openAdjust(r)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, padding: "6px 10px", fontSize: 12 }}>
+                    <Clock size={13} /> Ajustar ponto e aprovar
+                  </button>
+                ) : (
+                  <button onClick={() => setStatus(r.id, "aprovada")} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
+                    <CheckCircle2 size={13} /> Aprovar
+                  </button>
+                )}
                 <button onClick={() => setStatus(r.id, "rejeitada")} style={{ ...ghostBtnStyle, color: COLORS.red, borderColor: COLORS.red, padding: "6px 10px", fontSize: 12 }}>
                   <XCircle size={13} /> Rejeitar
                 </button>
               </div>
             )}
+
+            {adjustingId === r.id && (
+              <div style={{ marginTop: 12, background: COLORS.surfaceRaised, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+                <div style={{ fontSize: 12, color: COLORS.textDim }}>
+                  Batidas de {r.employeeName} em {fmtDate(new Date(r.date + "T00:00:00"))} — ajuste os horários, remova ou adicione batidas conforme necessário.
+                </div>
+                {draftPunches.length === 0 && (
+                  <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhuma batida registrada nesse dia ainda.</div>
+                )}
+                {draftPunches.map(dp => (
+                  <div key={dp.key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <select value={dp.action} onChange={e => updateDraftPunch(dp.key, "action", e.target.value)} style={{ ...selectStyle, width: 110 }}>
+                      <option value="entrada">Entrada</option>
+                      <option value="saida">Saída</option>
+                    </select>
+                    <input type="time" value={dp.time} onChange={e => updateDraftPunch(dp.key, "time", e.target.value)} style={{ ...selectStyle, width: 110 }} />
+                    <button onClick={() => removeDraftPunch(dp.key)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ))}
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <select value={newAction} onChange={e => setNewAction(e.target.value)} style={{ ...selectStyle, width: 110 }}>
+                    <option value="entrada">Entrada</option>
+                    <option value="saida">Saída</option>
+                  </select>
+                  <input type="time" value={newTime} onChange={e => setNewTime(e.target.value)} style={{ ...selectStyle, width: 110 }} />
+                  <button onClick={addDraftPunch} style={{ ...ghostBtnStyle, padding: "6px 10px", fontSize: 12 }}><Plus size={13} /> Adicionar batida</button>
+                </div>
+                <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                  <button onClick={() => saveAdjustment(r)} disabled={saving} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, opacity: saving ? 0.6 : 1 }}>
+                    {saving ? "Salvando…" : "Salvar ajuste e aprovar"}
+                  </button>
+                  <button onClick={() => setAdjustingId(null)} style={ghostBtnStyle}>Cancelar</button>
+                </div>
+              </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );
