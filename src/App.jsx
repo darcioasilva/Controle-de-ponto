@@ -892,7 +892,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
         <TabBtn icon={Users} label="Funcionários" active={tab === "employees"} onClick={() => setTab("employees")} />
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
-      {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} />}
+      {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
@@ -920,10 +920,14 @@ function TabBtn({ icon: Icon, label, active, onClick, badge }) {
 }
 
 // ---- Records tab ----
-function RecordsTab({ employees, punches, persistPunches, leaves }) {
+function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPunches }) {
   const [filterStore, setFilterStore] = useState("all");
   const [filterDate, setFilterDate] = useState(fmtDateKey(new Date()));
   const [expanded, setExpanded] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editTime, setEditTime] = useState("");
+  const [editAction, setEditAction] = useState("entrada");
+  const [savingEdit, setSavingEdit] = useState(false);
 
   const onLeaveThisDay = useMemo(() => {
     if (!filterDate) return [];
@@ -939,6 +943,22 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
     .sort((a, b) => new Date(b.at) - new Date(a.at)), [punches, filterStore, filterDate]);
 
   const removeRecord = async (id) => { await persistPunches(punches.filter(p => p.id !== id)); };
+
+  const startEdit = (p) => {
+    setEditingId(p.id);
+    setEditTime(fmtTime(new Date(p.at)).slice(0, 5));
+    setEditAction(p.action);
+  };
+  const saveEdit = async (p) => {
+    setSavingEdit(true);
+    const latest = await fetchLatestPunches();
+    const dateKey = fmtDateKey(new Date(p.at));
+    const newAt = new Date(`${dateKey}T${editTime}:00`).toISOString();
+    const next = latest.map(pp => pp.id === p.id ? { ...pp, action: editAction, at: newAt } : pp);
+    await persistPunches(next);
+    setSavingEdit(false);
+    setEditingId(null);
+  };
 
   const exportCSV = () => {
     const header = "Funcionário,Loja,Ação,Data,Hora,Fora da área\n";
@@ -1017,8 +1037,22 @@ function RecordsTab({ employees, punches, persistPunches, leaves }) {
                 )}
               </div>
               <div style={{ fontFamily: FONT_MONO, fontSize: 15 }}>{fmtTime(new Date(p.at))}</div>
+              <button onClick={(e) => { e.stopPropagation(); startEdit(p); }} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Clock size={15} /></button>
               <button onClick={(e) => { e.stopPropagation(); removeRecord(p.id); }} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
             </div>
+            {editingId === p.id && (
+              <div style={{ padding: "0 14px 14px 58px", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <select value={editAction} onChange={e => setEditAction(e.target.value)} style={{ ...selectStyle, width: 110 }}>
+                  <option value="entrada">Entrada</option>
+                  <option value="saida">Saída</option>
+                </select>
+                <input type="time" value={editTime} onChange={e => setEditTime(e.target.value)} style={{ ...selectStyle, width: 110 }} />
+                <button onClick={() => saveEdit(p)} disabled={savingEdit} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, fontSize: 12, padding: "6px 10px", opacity: savingEdit ? 0.6 : 1 }}>
+                  {savingEdit ? "Salvando…" : "Salvar"}
+                </button>
+                <button onClick={() => setEditingId(null)} style={{ ...ghostBtnStyle, fontSize: 12, padding: "6px 10px" }}>Cancelar</button>
+              </div>
+            )}
             {expanded === p.id && (() => {
               return (
                 <div style={{ padding: "0 14px 14px 58px", display: "flex", gap: 16, alignItems: "flex-start", flexWrap: "wrap" }}>
