@@ -210,10 +210,16 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
             const durationMin = Math.round((new Date(p.at) - lunchOutAt) / 60000);
             const expectedMin = dayInfo.lunchMin ?? 30;
             const tol = norm.tolerance ?? 10;
-            intervalCount++; intervalSum += durationMin;
             let flag = "ok";
-            if (durationMin > expectedMin + tol) { longIntervals++; flag = "long"; }
-            else if (durationMin < expectedMin - tol) { shortIntervals++; flag = "short"; }
+            if (durationMin > 120) {
+              // Gap grande demais pra ser almoço de verdade (provável ausência/imprevisto) —
+              // fica registrado, mas não entra na média nem na contagem de "intervalo longo"
+              flag = "anomalia";
+            } else {
+              intervalCount++; intervalSum += durationMin;
+              if (durationMin > expectedMin + tol) { longIntervals++; flag = "long"; }
+              else if (durationMin < expectedMin - tol) { shortIntervals++; flag = "short"; }
+            }
             intervalDetails.push({ date: dateKey, outAt: lunchOutAt, returnAt: new Date(p.at), durationMin, expectedMin, flag });
             lunchOutAt = null;
           }
@@ -1904,8 +1910,8 @@ function ClosingTab({ employees, punches, leaves }) {
                             <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
                             <span style={{
                               fontFamily: FONT_MONO, fontWeight: 700,
-                              color: d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
-                            }}>{d.durationMin}min</span>
+                              color: d.flag === "anomalia" ? "#C77DB0" : d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
+                            }}>{d.durationMin}min{d.flag === "anomalia" && " · anomalia (fora da média)"}</span>
                           </div>
                         ))}
                       </div>
