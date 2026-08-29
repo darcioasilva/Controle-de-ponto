@@ -192,6 +192,7 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
 
     // Verificação do intervalo de almoço: compara a duração real (saída → volta) com a configurada
     let longIntervals = 0, shortIntervals = 0, intervalSum = 0, intervalCount = 0;
+    const intervalDetails = [];
     {
       const norm = normalizeSchedule(emp.schedule);
       let prevDateKey2 = null, dIdx = 0, lunchOutAt = null;
@@ -206,12 +207,14 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
           if (dIdx === 1 && p.action === "saida") {
             lunchOutAt = new Date(p.at);
           } else if (dIdx === 2 && p.action === "entrada" && lunchOutAt) {
-            const durationMin = (new Date(p.at) - lunchOutAt) / 60000;
+            const durationMin = Math.round((new Date(p.at) - lunchOutAt) / 60000);
             const expectedMin = dayInfo.lunchMin ?? 30;
             const tol = norm.tolerance ?? 10;
             intervalCount++; intervalSum += durationMin;
-            if (durationMin > expectedMin + tol) longIntervals++;
-            else if (durationMin < expectedMin - tol) shortIntervals++;
+            let flag = "ok";
+            if (durationMin > expectedMin + tol) { longIntervals++; flag = "long"; }
+            else if (durationMin < expectedMin - tol) { shortIntervals++; flag = "short"; }
+            intervalDetails.push({ date: dateKey, outAt: lunchOutAt, returnAt: new Date(p.at), durationMin, expectedMin, flag });
             lunchOutAt = null;
           }
         }
@@ -228,7 +231,7 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount };
+    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails };
   });
 }
 
@@ -1775,6 +1778,7 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches }) {
 function ClosingTab({ employees, punches, leaves }) {
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
   const [storeFilter, setStoreFilter] = useState("all");
+  const [expandedEmp, setExpandedEmp] = useState(null);
 
   const importedTotal = useMemo(() => punches.filter(p => p.importedFrom === "pontomais").length, [punches]);
   const importedThisMonth = useMemo(
@@ -1871,7 +1875,9 @@ function ClosingTab({ employees, punches, leaves }) {
             </thead>
             <tbody>
               {summary.map(s => (
-                <tr key={s.emp.id} style={{ borderTop: `1px solid ${COLORS.border}` }}>
+                <React.Fragment key={s.emp.id}>
+                <tr style={{ borderTop: `1px solid ${COLORS.border}`, cursor: s.intervalDetails.length ? "pointer" : "default" }}
+                  onClick={() => s.intervalDetails.length && setExpandedEmp(expandedEmp === s.emp.id ? null : s.emp.id)}>
                   <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.emp.name}</td>
                   <td style={{ padding: "8px 10px" }}>{s.daysWorked}</td>
                   <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
@@ -1885,6 +1891,28 @@ function ClosingTab({ employees, punches, leaves }) {
                   <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.paternidade || "—"}</td>
                   <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.outro || "—"}</td>
                 </tr>
+                {expandedEmp === s.emp.id && (
+                  <tr>
+                    <td colSpan={12} style={{ padding: "0 10px 12px 10px", background: COLORS.surfaceRaised }}>
+                      <div style={{ fontSize: 11, color: COLORS.textDim, margin: "8px 0 6px" }}>
+                        Intervalos de almoço registrados em {monthLabel} (esperado: {s.intervalDetails[0]?.expectedMin ?? "—"}min):
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                        {s.intervalDetails.map((d, i) => (
+                          <div key={i} style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                            <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                            <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
+                            <span style={{
+                              fontFamily: FONT_MONO, fontWeight: 700,
+                              color: d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
+                            }}>{d.durationMin}min</span>
+                          </div>
+                        ))}
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
