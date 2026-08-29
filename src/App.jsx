@@ -174,6 +174,7 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
     const daysWorked = new Set();
     let lateCount = 0, earlyLeaveCount = 0;
     let prevDateKey = null, dayIdx = 0;
+    const punchDetails = [];
     for (let i = 0; i < empPunches.length; i++) {
       const dateKey = fmtDateKey(new Date(empPunches[i].at));
       dayIdx = dateKey === prevDateKey ? dayIdx + 1 : 0;
@@ -181,6 +182,10 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
       const status = getScheduleStatus(empPunches[i], emp, dayIdx);
       if (status?.label?.startsWith("Atraso")) lateCount++;
       if (status?.label?.startsWith("Saída antecipada")) earlyLeaveCount++;
+      punchDetails.push({
+        date: dateKey, time: fmtTime(new Date(empPunches[i].at)), action: empPunches[i].action,
+        statusLabel: status?.label || null, statusColor: status?.color || COLORS.textDim,
+      });
     }
     for (let i = 0; i < empPunches.length; i++) {
       if (empPunches[i].action === "entrada" && empPunches[i + 1]?.action === "saida") {
@@ -237,7 +242,7 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails };
+    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails, punchDetails };
   });
 }
 
@@ -1785,6 +1790,7 @@ function ClosingTab({ employees, punches, leaves }) {
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
   const [storeFilter, setStoreFilter] = useState("all");
   const [expandedEmp, setExpandedEmp] = useState(null);
+  const [detailView, setDetailView] = useState("punches"); // punches | intervals
 
   const importedTotal = useMemo(() => punches.filter(p => p.importedFrom === "pontomais").length, [punches]);
   const importedThisMonth = useMemo(
@@ -1882,8 +1888,8 @@ function ClosingTab({ employees, punches, leaves }) {
             <tbody>
               {summary.map(s => (
                 <React.Fragment key={s.emp.id}>
-                <tr style={{ borderTop: `1px solid ${COLORS.border}`, cursor: s.intervalDetails.length ? "pointer" : "default" }}
-                  onClick={() => s.intervalDetails.length && setExpandedEmp(expandedEmp === s.emp.id ? null : s.emp.id)}>
+                <tr style={{ borderTop: `1px solid ${COLORS.border}`, cursor: "pointer" }}
+                  onClick={() => setExpandedEmp(expandedEmp === s.emp.id ? null : s.emp.id)}>
                   <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.emp.name}</td>
                   <td style={{ padding: "8px 10px" }}>{s.daysWorked}</td>
                   <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
@@ -1900,21 +1906,61 @@ function ClosingTab({ employees, punches, leaves }) {
                 {expandedEmp === s.emp.id && (
                   <tr>
                     <td colSpan={12} style={{ padding: "0 10px 12px 10px", background: COLORS.surfaceRaised }}>
-                      <div style={{ fontSize: 11, color: COLORS.textDim, margin: "8px 0 6px" }}>
-                        Intervalos de almoço registrados em {monthLabel} (esperado: {s.intervalDetails[0]?.expectedMin ?? "—"}min):
+                      <div style={{ display: "flex", gap: 8, margin: "10px 0 8px" }}>
+                        <button onClick={(e) => { e.stopPropagation(); setDetailView("punches"); }} style={{
+                          ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+                          background: detailView === "punches" ? COLORS.surface : "transparent",
+                          borderColor: detailView === "punches" ? COLORS.border : "transparent",
+                          color: detailView === "punches" ? COLORS.text : COLORS.textDim,
+                        }}>Entrada/Saída</button>
+                        <button onClick={(e) => { e.stopPropagation(); setDetailView("intervals"); }} style={{
+                          ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+                          background: detailView === "intervals" ? COLORS.surface : "transparent",
+                          borderColor: detailView === "intervals" ? COLORS.border : "transparent",
+                          color: detailView === "intervals" ? COLORS.text : COLORS.textDim,
+                        }}>Intervalos de almoço</button>
                       </div>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                        {s.intervalDetails.map((d, i) => (
-                          <div key={i} style={{ display: "flex", gap: 10, fontSize: 12 }}>
-                            <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
-                            <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
-                            <span style={{
-                              fontFamily: FONT_MONO, fontWeight: 700,
-                              color: d.flag === "anomalia" ? "#C77DB0" : d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
-                            }}>{d.durationMin}min{d.flag === "anomalia" && " · anomalia (fora da média)"}</span>
+
+                      {detailView === "punches" ? (
+                        s.punchDetails.length === 0 ? (
+                          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum ponto registrado em {monthLabel}.</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                            {s.punchDetails.map((d, i) => (
+                              <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, alignItems: "center" }}>
+                                <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                                <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 60 }}>{d.time.slice(0, 5)}</span>
+                                <span style={{ width: 62, color: d.action === "entrada" ? COLORS.teal : COLORS.amber }}>
+                                  {d.action === "entrada" ? "Entrada" : "Saída"}
+                                </span>
+                                <span style={{ fontWeight: 600, color: d.statusColor }}>{d.statusLabel || "—"}</span>
+                              </div>
+                            ))}
                           </div>
-                        ))}
-                      </div>
+                        )
+                      ) : (
+                        s.intervalDetails.length === 0 ? (
+                          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum intervalo registrado em {monthLabel}.</div>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 6 }}>
+                              Esperado: {s.intervalDetails[0]?.expectedMin ?? "—"}min
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                              {s.intervalDetails.map((d, i) => (
+                                <div key={i} style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                                  <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                                  <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
+                                  <span style={{
+                                    fontFamily: FONT_MONO, fontWeight: 700,
+                                    color: d.flag === "anomalia" ? "#C77DB0" : d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
+                                  }}>{d.durationMin}min{d.flag === "anomalia" && " · anomalia (fora da média)"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )
+                      )}
                     </td>
                   </tr>
                 )}
