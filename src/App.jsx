@@ -1888,4 +1888,521 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
           {needsGuidance.map(s => (
             <div key={s.emp.id} style={{ fontSize: 13 }}>
               <b>{s.emp.name}</b>:{" "}
-              {s.longIntervals >= REPEAT_THRESHOLD && `${s.longIntervals}x intervalo mais l
+              {s.longIntervals >= REPEAT_THRESHOLD && `${s.longIntervals}x intervalo mais longo que o previsto`}
+              {s.longIntervals >= REPEAT_THRESHOLD && s.shortIntervals >= REPEAT_THRESHOLD && " · "}
+              {s.shortIntervals >= REPEAT_THRESHOLD && `${s.shortIntervals}x intervalo mais curto que o previsto`}
+              {s.avgIntervalMin != null && <span style={{ color: COLORS.textDim }}> (média: {s.avgIntervalMin}min)</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto" }}>
+        {summary.length === 0 ? (
+          <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum funcionário cadastrado.</div>
+        ) : (
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${COLORS.border}`, textAlign: "left" }}>
+                {["Funcionário", "Dias", "Horas", "Atrasos", "Saída ant.", "Interv. longo", "Interv. curto", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
+                  <th key={h} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {summary.map(s => (
+                <React.Fragment key={s.emp.id}>
+                <tr style={{ borderTop: `1px solid ${COLORS.border}`, cursor: "pointer" }}
+                  onClick={() => setExpandedEmp(expandedEmp === s.emp.id ? null : s.emp.id)}>
+                  <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.emp.name}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.daysWorked}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
+                  <td style={{ padding: "8px 10px", color: s.lateCount ? COLORS.red : COLORS.textDim }}>{s.lateCount}</td>
+                  <td style={{ padding: "8px 10px", color: s.earlyLeaveCount ? COLORS.amber : COLORS.textDim }}>{s.earlyLeaveCount}</td>
+                  <td style={{ padding: "8px 10px", color: s.longIntervals >= REPEAT_THRESHOLD ? COLORS.red : s.longIntervals ? COLORS.amber : COLORS.textDim, fontWeight: s.longIntervals >= REPEAT_THRESHOLD ? 700 : 400 }}>{s.longIntervals || "—"}</td>
+                  <td style={{ padding: "8px 10px", color: s.shortIntervals >= REPEAT_THRESHOLD ? COLORS.red : s.shortIntervals ? COLORS.amber : COLORS.textDim, fontWeight: s.shortIntervals >= REPEAT_THRESHOLD ? 700 : 400 }}>{s.shortIntervals || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.ferias || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.atestado || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.maternidade || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.paternidade || "—"}</td>
+                  <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.outro || "—"}</td>
+                </tr>
+                {expandedEmp === s.emp.id && (
+                  <tr>
+                    <td colSpan={12} style={{ padding: "0 10px 12px 10px", background: COLORS.surfaceRaised }}>
+                      <div style={{ display: "flex", gap: 8, margin: "10px 0 8px" }}>
+                        <button onClick={(e) => { e.stopPropagation(); setDetailView("punches"); }} style={{
+                          ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+                          background: detailView === "punches" ? COLORS.surface : "transparent",
+                          borderColor: detailView === "punches" ? COLORS.border : "transparent",
+                          color: detailView === "punches" ? COLORS.text : COLORS.textDim,
+                        }}>Entrada/Saída</button>
+                        <button onClick={(e) => { e.stopPropagation(); setDetailView("intervals"); }} style={{
+                          ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+                          background: detailView === "intervals" ? COLORS.surface : "transparent",
+                          borderColor: detailView === "intervals" ? COLORS.border : "transparent",
+                          color: detailView === "intervals" ? COLORS.text : COLORS.textDim,
+                        }}>Intervalos de almoço</button>
+                      </div>
+
+                      {detailView === "punches" ? (() => {
+                        const mainPunches = s.punchDetails.filter(d => d.statusLabel !== "Intervalo");
+                        return mainPunches.length === 0 ? (
+                          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum ponto registrado em {monthLabel}.</div>
+                        ) : (
+                          <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                            {mainPunches.map((d, i) => (
+                              <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, alignItems: "center" }}>
+                                <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                                <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 60 }}>{d.time.slice(0, 5)}</span>
+                                <span style={{ width: 62, color: d.action === "entrada" ? COLORS.teal : COLORS.amber }}>
+                                  {d.action === "entrada" ? "Entrada" : "Saída"}
+                                </span>
+                                <span style={{ fontWeight: 600, color: d.statusColor }}>{d.statusLabel || "—"}</span>
+                              </div>
+                            ))}
+                          </div>
+                        );
+                      })()
+                        : (
+                        s.intervalDetails.length === 0 ? (
+                          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum intervalo registrado em {monthLabel}.</div>
+                        ) : (
+                          <>
+                            <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 6 }}>
+                              Esperado: {s.intervalDetails[0]?.expectedMin ?? "—"}min
+                            </div>
+                            <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                              {s.intervalDetails.map((d, i) => (
+                                <div key={i} style={{ display: "flex", gap: 10, fontSize: 12 }}>
+                                  <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                                  <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
+                                  <span style={{
+                                    fontFamily: FONT_MONO, fontWeight: 700,
+                                    color: d.flag === "anomalia" ? "#C77DB0" : d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
+                                  }}>{d.durationMin}min{d.flag === "anomalia" && " · anomalia (fora da média)"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )
+                      )}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        O CSV pode ser aberto direto no Excel e enviado por e-mail ou WhatsApp para a contabilidade.
+      </div>
+    </div>
+  );
+}
+
+// ---- Employees tab ----
+function EmployeesTab({ employees, persistEmployees, restrictedStore }) {
+  const [showForm, setShowForm] = useState(false);
+  const [name, setName] = useState(""); const [pin, setPin] = useState(""); const [store, setStore] = useState(restrictedStore || STORES[0].id); const [err, setErr] = useState("");
+  const [refPhoto, setRefPhoto] = useState(null);
+  const [editingSchedule, setEditingSchedule] = useState(null);
+  const fileRef = useRef(null);
+
+  const handleRefPhoto = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const dataUrl = await resizeImageFile(file, 300, 300, 0.7);
+    setRefPhoto(dataUrl);
+  };
+
+  const addEmployee = async () => {
+    if (!name.trim()) { setErr("Informe o nome."); return; }
+    if (!/^\d{4}$/.test(pin)) { setErr("PIN precisa ter 4 dígitos."); return; }
+    if (employees.some(e => e.pin === pin && e.store === store)) { setErr("Esse PIN já está em uso nessa loja."); return; }
+    await persistEmployees([...employees, { id: `${Date.now()}`, name: name.trim(), pin, store, active: true, photo: refPhoto || null, schedule: null }]);
+    setName(""); setPin(""); setErr(""); setRefPhoto(null); setShowForm(false);
+  };
+  const toggleActive = async (id) => { await persistEmployees(employees.map(e => e.id === id ? { ...e, active: !(e.active !== false) } : e)); };
+  const removeEmployee = async (id) => { await persistEmployees(employees.filter(e => e.id !== id)); };
+  const saveSchedule = async (id, schedule) => {
+    await persistEmployees(employees.map(e => e.id === id ? { ...e, schedule } : e));
+    setEditingSchedule(null);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {!showForm ? (
+        <button onClick={() => setShowForm(true)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, alignSelf: "flex-start" }}><Plus size={14} /> Novo funcionário</button>
+      ) : (
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <input ref={fileRef} type="file" accept="image/*" capture="user" onChange={handleRefPhoto} style={{ display: "none" }} />
+            <button onClick={() => fileRef.current?.click()} style={{
+              width: 56, height: 56, borderRadius: 12, border: `1px dashed ${COLORS.border}`, background: COLORS.surfaceRaised,
+              display: "flex", alignItems: "center", justifyContent: "center", padding: 0, overflow: "hidden", flexShrink: 0,
+            }}>
+              {refPhoto ? <img src={refPhoto} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={18} color={COLORS.textDim} />}
+            </button>
+            <div style={{ fontSize: 12, color: COLORS.textDim }}>Foto de referência (opcional, ajuda a conferir quem bateu o ponto)</div>
+          </div>
+          <input placeholder="Nome" value={name} onChange={e => setName(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <input placeholder="PIN (4 dígitos)" value={pin} maxLength={4} onChange={e => setPin(e.target.value.replace(/\D/g, ""))} style={{ ...selectStyle, flex: 1 }} />
+            {restrictedStore ? (
+              <div style={{ ...selectStyle, color: COLORS.textDim }}>{STORES.find(s => s.id === restrictedStore)?.label}</div>
+            ) : (
+              <select value={store} onChange={e => setStore(e.target.value)} style={selectStyle}>{STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}</select>
+            )}
+          </div>
+          {err && <div style={{ color: COLORS.red, fontSize: 12 }}>{err}</div>}
+          <div style={{ color: COLORS.textDim, fontSize: 11 }}>O horário de trabalho é configurado depois, na lista abaixo.</div>
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button onClick={addEmployee} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
+            <button onClick={() => { setShowForm(false); setErr(""); setRefPhoto(null); }} style={ghostBtnStyle}>Cancelar</button>
+          </div>
+        </div>
+      )}
+
+      {STORES.filter(s => !restrictedStore || s.id === restrictedStore).map(s => (
+        <div key={s.id}>
+          <div style={{ fontSize: 12, color: COLORS.textDim, textTransform: "uppercase", letterSpacing: 0.5, margin: "4px 0" }}>{s.label}</div>
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+            {employees.filter(e => e.store === s.id).length === 0 ? (
+              <div style={{ padding: 16, color: COLORS.textDim, fontSize: 13 }}>Nenhum funcionário cadastrado.</div>
+            ) : employees.filter(e => e.store === s.id).map((e, i) => (
+              <div key={e.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", opacity: e.active === false ? 0.5 : 1 }}>
+                  {e.photo ? (
+                    <img src={e.photo} alt="" style={{ width: 36, height: 36, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+                  ) : (
+                    <div style={{ width: 36, height: 36, borderRadius: "50%", background: COLORS.surfaceRaised, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 }}>
+                      <Users size={15} color={COLORS.textDim} />
+                    </div>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 600, fontSize: 14 }}>{e.name}</div>
+                    <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {e.pin}</div>
+                    {e.schedule ? (
+                      <div style={{ color: COLORS.teal, fontSize: 11, marginTop: 2 }}>
+                        {formatScheduleSummary(e.schedule)}
+                      </div>
+                    ) : (
+                      <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>Sem horário definido</div>
+                    )}
+                  </div>
+                  <button onClick={() => setEditingSchedule(editingSchedule === e.id ? null : e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>
+                    <Clock size={12} /> Horário
+                  </button>
+                  <button onClick={() => toggleActive(e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>{e.active === false ? "Ativar" : "Desativar"}</button>
+                  <button onClick={() => removeEmployee(e.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+                </div>
+                {editingSchedule === e.id && (
+                  <ScheduleEditor employee={e} onSave={(sch) => saveSchedule(e.id, sch)} onCancel={() => setEditingSchedule(null)} />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ScheduleEditor({ employee, onSave, onCancel }) {
+  const initialNorm = normalizeSchedule(employee.schedule);
+  const [perDay, setPerDay] = useState(initialNorm?.perDay || {});
+  const [tolerance, setTolerance] = useState(initialNorm?.tolerance ?? 10);
+
+  const toggleDay = (d) => {
+    setPerDay(prev => {
+      if (prev[d]) {
+        const next = { ...prev };
+        delete next[d];
+        return next;
+      }
+      return { ...prev, [d]: { entrada: "08:00", saida: "17:00", lunch: false, lunchMin: 30 } };
+    });
+  };
+  const updateDay = (d, field, value) => {
+    setPerDay(prev => ({ ...prev, [d]: { ...prev[d], [field]: value } }));
+  };
+  const toggleLunch = (d) => {
+    setPerDay(prev => ({ ...prev, [d]: { ...prev[d], lunch: !prev[d].lunch, lunchMin: prev[d].lunchMin ?? 30 } }));
+  };
+  const copyToAll = (d) => {
+    const src = perDay[d];
+    if (!src) return;
+    setPerDay(prev => {
+      const next = { ...prev };
+      WEEK_ORDER.forEach(day => { if (next[day]) next[day] = { ...src }; });
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ padding: "0 14px 14px 14px", display: "flex", flexDirection: "column", gap: 10, background: COLORS.surfaceRaised }}>
+      <div style={{ width: 110 }}>
+        <div style={fieldLabel}>Tolerância (min)</div>
+        <input type="number" value={tolerance} onChange={e => setTolerance(Number(e.target.value) || 0)} style={{ ...selectStyle, width: "100%" }} />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {WEEK_ORDER.map(d => {
+          const info = perDay[d];
+          return (
+            <div key={d} style={{ display: "flex", flexDirection: "column", gap: 6, paddingBottom: 6, borderBottom: `1px solid ${COLORS.border}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <button onClick={() => toggleDay(d)} style={{
+                  width: 44, height: 32, flexShrink: 0, borderRadius: 7, fontSize: 12, fontWeight: 600,
+                  background: info ? COLORS.amber : COLORS.surface,
+                  color: info ? "#1A1400" : COLORS.textDim,
+                  border: `1px solid ${info ? COLORS.amber : COLORS.border}`,
+                }}>{WEEKDAYS[d]}</button>
+                {info ? (
+                  <>
+                    <input type="time" value={info.entrada} onChange={e => updateDay(d, "entrada", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                    <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+                    <input type="time" value={info.saida} onChange={e => updateDay(d, "saida", e.target.value)} style={{ ...selectStyle, width: 100 }} />
+                    <button onClick={() => copyToAll(d)} title="Copiar este horário para todos os dias marcados" style={{ background: "none", border: "none", color: COLORS.textDim, fontSize: 11, padding: 4 }}>
+                      Copiar p/ todos
+                    </button>
+                  </>
+                ) : (
+                  <span style={{ color: COLORS.textDim, fontSize: 12 }}>Folga</span>
+                )}
+              </div>
+              {info && (
+                <label style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 52, fontSize: 12, color: COLORS.textDim }}>
+                  <input type="checkbox" checked={!!info.lunch} onChange={() => toggleLunch(d)} />
+                  Tem intervalo de almoço
+                  {info.lunch && (
+                    <>
+                      <input type="number" value={info.lunchMin ?? 30} onChange={e => updateDay(d, "lunchMin", Number(e.target.value) || 0)} style={{ ...selectStyle, width: 60 }} />
+                      min (duração de referência)
+                    </>
+                  )}
+                </label>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <button onClick={() => onSave({ perDay, tolerance })} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar horário</button>
+        <button onClick={onCancel} style={ghostBtnStyle}>Cancelar</button>
+      </div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>Tolerância: minutos de atraso/antecipação aceitos antes de marcar como fora do horário.</div>
+    </div>
+  );
+}
+
+// ---- Settings tab ----
+function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, overtimeCode, persistOvertimeCode }) {
+  const [localCoords, setLocalCoords] = useState(storeCoords);
+  const [locating, setLocating] = useState(null);
+  const [showAddAdmin, setShowAddAdmin] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [newStore, setNewStore] = useState(STORES[0].id);
+  const [adminErr, setAdminErr] = useState("");
+  const isMaster = currentAdmin?.role === "master";
+
+  const addAdmin = async () => {
+    if (!newName.trim()) { setAdminErr("Informe o nome."); return; }
+    if (!/^\d{4,6}$/.test(newPin)) { setAdminErr("PIN precisa ter de 4 a 6 dígitos."); return; }
+    if (adminList.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
+    await persistAdminList([...adminList, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin", store: newStore }]);
+    setNewName(""); setNewPin(""); setNewStore(STORES[0].id); setAdminErr(""); setShowAddAdmin(false);
+  };
+  const removeAdmin = async (id) => {
+    if (adminList.length <= 1) return;
+    await persistAdminList(adminList.filter(a => a.id !== id));
+  };
+
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editPin, setEditPin] = useState("");
+  const [editStore, setEditStore] = useState(STORES[0].id);
+  const [editErr, setEditErr] = useState("");
+
+  const startEditAdmin = (a) => { setEditingId(a.id); setEditName(a.name); setEditPin(a.pin); setEditStore(a.store || STORES[0].id); setEditErr(""); };
+  const saveEditAdmin = async (id) => {
+    if (!editName.trim()) { setEditErr("Informe o nome."); return; }
+    if (!/^\d{4,6}$/.test(editPin)) { setEditErr("PIN precisa ter de 4 a 6 dígitos."); return; }
+    if (adminList.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
+    const target = adminList.find(a => a.id === id);
+    await persistAdminList(adminList.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin, ...(target?.role !== "master" ? { store: editStore } : {}) } : a));
+    setEditingId(null); setEditErr("");
+  };
+
+  const useCurrentLocation = async (storeId) => {
+    setLocating(storeId);
+    const loc = await getLocation();
+    if (loc) setLocalCoords(prev => ({ ...prev, [storeId]: { ...(prev[storeId] || {}), lat: loc.lat, lng: loc.lng, radius: prev[storeId]?.radius || 150 } }));
+    setLocating(null);
+  };
+  const updateRadius = (storeId, radius) => setLocalCoords(prev => ({ ...prev, [storeId]: { ...(prev[storeId] || {}), radius: Number(radius) || 0 } }));
+  const saveCoords = async () => { await persistStoreCoords(localCoords); };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 380 }}>
+        <div style={{ fontSize: 13, color: COLORS.textDim }}>Administradores</div>
+        {adminList.map(a => {
+          const canEdit = isMaster || currentAdmin?.id === a.id;
+          return (
+          <div key={a.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                  {a.name}
+                  {a.role === "master" && (
+                    <span style={{ fontSize: 10, color: COLORS.amber, border: `1px solid ${COLORS.amberDim}`, borderRadius: 20, padding: "1px 7px", fontWeight: 700 }}>MASTER</span>
+                  )}
+                  {currentAdmin?.id === a.id && <span style={{ color: COLORS.teal, fontSize: 11 }}>(você)</span>}
+                </div>
+                <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>
+                  PIN {(isMaster || currentAdmin?.id === a.id) ? a.pin : "••••"}
+                </div>
+                {a.role !== "master" && (
+                  <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>
+                    Administra: {STORES.find(s => s.id === a.store)?.label || "—"}
+                  </div>
+                )}
+              </div>
+              {canEdit && editingId !== a.id && (
+                <button onClick={() => startEditAdmin(a)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>Editar</button>
+              )}
+              {isMaster && a.role !== "master" && adminList.length > 1 && (
+                <button onClick={() => removeAdmin(a.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+              )}
+            </div>
+            {editingId === a.id && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, background: COLORS.surfaceRaised, borderRadius: 8, padding: 10 }}>
+                <input placeholder="Nome" value={editName} onChange={e => setEditName(e.target.value)} style={selectStyle} />
+                <input placeholder="PIN (4 a 6 dígitos)" value={editPin} maxLength={6} onChange={e => setEditPin(e.target.value.replace(/\D/g, ""))} style={selectStyle} />
+                {a.role !== "master" && (
+                  <select value={editStore} onChange={e => setEditStore(e.target.value)} style={selectStyle}>
+                    {STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+                  </select>
+                )}
+                {editErr && <div style={{ color: COLORS.red, fontSize: 12 }}>{editErr}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => saveEditAdmin(a.id)} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
+                  <button onClick={() => setEditingId(null)} style={ghostBtnStyle}>Cancelar</button>
+                </div>
+              </div>
+            )}
+          </div>
+          );
+        })}
+        {!isMaster ? (
+          <div style={{ color: COLORS.textDim, fontSize: 12 }}>Só o administrador Master pode criar ou remover outros administradores.</div>
+        ) : !showAddAdmin ? (
+          <button onClick={() => setShowAddAdmin(true)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, alignSelf: "flex-start" }}>
+            <Plus size={14} /> Novo administrador
+          </button>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: `1px solid ${COLORS.border}`, paddingTop: 10 }}>
+            <input placeholder="Nome" value={newName} onChange={e => setNewName(e.target.value)} style={selectStyle} />
+            <input placeholder="PIN (4 a 6 dígitos)" value={newPin} maxLength={6} onChange={e => setNewPin(e.target.value.replace(/\D/g, ""))} style={selectStyle} />
+            <select value={newStore} onChange={e => setNewStore(e.target.value)} style={selectStyle}>
+              {STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+            {adminErr && <div style={{ color: COLORS.red, fontSize: 12 }}>{adminErr}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={addAdmin} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
+              <button onClick={() => { setShowAddAdmin(false); setAdminErr(""); }} style={ghostBtnStyle}>Cancelar</button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 380 }}>
+        <div style={{ fontSize: 13, color: COLORS.textDim }}>Código de hora extra (entrada antes do horário)</div>
+        <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+          Gere um código na hora e passe por telefone/WhatsApp pra quem precisar entrar antes do horário. Vale só uma vez e expira em {OVERTIME_CODE_VALID_MIN} minutos.
+        </div>
+        <OvertimeCodeGenerator overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} currentAdmin={currentAdmin} />
+      </div>
+
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 14, maxWidth: 420 }}>
+        <div style={{ fontSize: 13, color: COLORS.textDim }}>Localização das lojas (para validar geolocalização do ponto)</div>
+        {STORES.map(s => (
+          <div key={s.id} style={{ borderTop: `1px solid ${COLORS.border}`, paddingTop: 10 }}>
+            <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{s.label}</div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button onClick={() => useCurrentLocation(s.id)} style={{ ...ghostBtnStyle, fontSize: 12, padding: "6px 10px" }}>
+                <MapPin size={13} /> {locating === s.id ? "Obtendo…" : "Usar localização atual"}
+              </button>
+              {localCoords[s.id]?.lat && (
+                <span style={{ fontSize: 11, color: COLORS.textDim, fontFamily: FONT_MONO }}>
+                  {localCoords[s.id].lat.toFixed(5)}, {localCoords[s.id].lng.toFixed(5)}
+                </span>
+              )}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+              <span style={{ fontSize: 12, color: COLORS.textDim }}>Raio permitido</span>
+              <input type="number" value={localCoords[s.id]?.radius ?? 150} onChange={e => updateRadius(s.id, e.target.value)} style={{ ...selectStyle, width: 80 }} />
+              <span style={{ fontSize: 12, color: COLORS.textDim }}>metros</span>
+            </div>
+          </div>
+        ))}
+        <button onClick={saveCoords} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, alignSelf: "flex-start" }}>Salvar localizações</button>
+        <div style={{ color: COLORS.textDim, fontSize: 11 }}>Dica: abra este app no tablet da loja, fique no local e clique em "Usar localização atual".</div>
+      </div>
+
+      <div style={{ color: COLORS.textDim, fontSize: 12, maxWidth: 420 }}>
+        Os dados (funcionários, registros, solicitações e fotos) ficam salvos automaticamente e são compartilhados entre todos os dispositivos que abrirem este app.
+      </div>
+    </div>
+  );
+}
+
+function OvertimeCodeGenerator({ overtimeCode, persistOvertimeCode, currentAdmin }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => forceTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const now = new Date();
+  const isActive = overtimeCode && !overtimeCode.used && new Date(overtimeCode.expiresAt) > now;
+  const minutesLeft = isActive ? Math.max(0, Math.ceil((new Date(overtimeCode.expiresAt) - now) / 60000)) : 0;
+
+  const generate = async () => {
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + OVERTIME_CODE_VALID_MIN * 60000);
+    await persistOvertimeCode({
+      code, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString(),
+      used: false, generatedBy: currentAdmin?.name || "Admin",
+    });
+  };
+
+  if (isActive) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 32, fontWeight: 700, letterSpacing: 4, color: COLORS.amber }}>{overtimeCode.code}</div>
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>Válido por mais {minutesLeft} min · gerado por {overtimeCode.generatedBy}</div>
+        <button onClick={generate} style={{ ...ghostBtnStyle, alignSelf: "flex-start", fontSize: 12, padding: "6px 10px" }}>Gerar novo código (invalida este)</button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {overtimeCode?.used && (
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>
+          Último código já foi usado por {overtimeCode.usedBy || "um funcionário"}.
+        </div>
+      )}
+      <button onClick={generate} style={{ ...ghostBtnStyle, alignSelf: "flex-start", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+        Gerar código de hora extra
+      </button>
+    </div>
+  );
+}
