@@ -1921,12 +1921,13 @@ function ClosingTab({ employees, punches, leaves }) {
                         }}>Intervalos de almoço</button>
                       </div>
 
-                      {detailView === "punches" ? (
-                        s.punchDetails.length === 0 ? (
+                      {detailView === "punches" ? (() => {
+                        const mainPunches = s.punchDetails.filter(d => d.statusLabel !== "Intervalo");
+                        return mainPunches.length === 0 ? (
                           <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum ponto registrado em {monthLabel}.</div>
                         ) : (
                           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-                            {s.punchDetails.map((d, i) => (
+                            {mainPunches.map((d, i) => (
                               <div key={i} style={{ display: "flex", gap: 10, fontSize: 12, alignItems: "center" }}>
                                 <span style={{ width: 80 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
                                 <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 60 }}>{d.time.slice(0, 5)}</span>
@@ -1937,8 +1938,9 @@ function ClosingTab({ employees, punches, leaves }) {
                               </div>
                             ))}
                           </div>
-                        )
-                      ) : (
+                        );
+                      })()
+                        : (
                         s.intervalDetails.length === 0 ? (
                           <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum intervalo registrado em {monthLabel}.</div>
                         ) : (
