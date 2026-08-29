@@ -1976,6 +1976,20 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
     await persistAdminList(adminList.filter(a => a.id !== id));
   };
 
+  const [editingId, setEditingId] = useState(null);
+  const [editName, setEditName] = useState("");
+  const [editPin, setEditPin] = useState("");
+  const [editErr, setEditErr] = useState("");
+
+  const startEditAdmin = (a) => { setEditingId(a.id); setEditName(a.name); setEditPin(a.pin); setEditErr(""); };
+  const saveEditAdmin = async (id) => {
+    if (!editName.trim()) { setEditErr("Informe o nome."); return; }
+    if (!/^\d{4,6}$/.test(editPin)) { setEditErr("PIN precisa ter de 4 a 6 dígitos."); return; }
+    if (adminList.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
+    await persistAdminList(adminList.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin } : a));
+    setEditingId(null); setEditErr("");
+  };
+
   const useCurrentLocation = async (storeId) => {
     setLocating(storeId);
     const loc = await getLocation();
@@ -1989,23 +2003,42 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 380 }}>
         <div style={{ fontSize: 13, color: COLORS.textDim }}>Administradores</div>
-        {adminList.map(a => (
-          <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
-                {a.name}
-                {a.role === "master" && (
-                  <span style={{ fontSize: 10, color: COLORS.amber, border: `1px solid ${COLORS.amberDim}`, borderRadius: 20, padding: "1px 7px", fontWeight: 700 }}>MASTER</span>
-                )}
-                {currentAdmin?.id === a.id && <span style={{ color: COLORS.teal, fontSize: 11 }}>(você)</span>}
+        {adminList.map(a => {
+          const canEdit = isMaster || currentAdmin?.id === a.id;
+          return (
+          <div key={a.id} style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                  {a.name}
+                  {a.role === "master" && (
+                    <span style={{ fontSize: 10, color: COLORS.amber, border: `1px solid ${COLORS.amberDim}`, borderRadius: 20, padding: "1px 7px", fontWeight: 700 }}>MASTER</span>
+                  )}
+                  {currentAdmin?.id === a.id && <span style={{ color: COLORS.teal, fontSize: 11 }}>(você)</span>}
+                </div>
+                <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {a.pin}</div>
               </div>
-              <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {a.pin}</div>
+              {canEdit && editingId !== a.id && (
+                <button onClick={() => startEditAdmin(a)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>Editar</button>
+              )}
+              {isMaster && a.role !== "master" && adminList.length > 1 && (
+                <button onClick={() => removeAdmin(a.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+              )}
             </div>
-            {isMaster && a.role !== "master" && adminList.length > 1 && (
-              <button onClick={() => removeAdmin(a.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+            {editingId === a.id && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, background: COLORS.surfaceRaised, borderRadius: 8, padding: 10 }}>
+                <input placeholder="Nome" value={editName} onChange={e => setEditName(e.target.value)} style={selectStyle} />
+                <input placeholder="PIN (4 a 6 dígitos)" value={editPin} maxLength={6} onChange={e => setEditPin(e.target.value.replace(/\D/g, ""))} style={selectStyle} />
+                {editErr && <div style={{ color: COLORS.red, fontSize: 12 }}>{editErr}</div>}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => saveEditAdmin(a.id)} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
+                  <button onClick={() => setEditingId(null)} style={ghostBtnStyle}>Cancelar</button>
+                </div>
+              </div>
             )}
           </div>
-        ))}
+          );
+        })}
         {!isMaster ? (
           <div style={{ color: COLORS.textDim, fontSize: 12 }}>Só o administrador Master pode criar ou remover outros administradores.</div>
         ) : !showAddAdmin ? (
