@@ -2016,7 +2016,9 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
                   )}
                   {currentAdmin?.id === a.id && <span style={{ color: COLORS.teal, fontSize: 11 }}>(você)</span>}
                 </div>
-                <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {a.pin}</div>
+                <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>
+                  PIN {(isMaster || currentAdmin?.id === a.id) ? a.pin : "••••"}
+                </div>
               </div>
               {canEdit && editingId !== a.id && (
                 <button onClick={() => startEditAdmin(a)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>Editar</button>
