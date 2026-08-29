@@ -190,6 +190,35 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
       }
     }
 
+    // Verificação do intervalo de almoço: compara a duração real (saída → volta) com a configurada
+    let longIntervals = 0, shortIntervals = 0, intervalSum = 0, intervalCount = 0;
+    {
+      const norm = normalizeSchedule(emp.schedule);
+      let prevDateKey2 = null, dIdx = 0, lunchOutAt = null;
+      for (let i = 0; i < empPunches.length; i++) {
+        const p = empPunches[i];
+        const dateKey = fmtDateKey(new Date(p.at));
+        dIdx = dateKey === prevDateKey2 ? dIdx + 1 : 0;
+        prevDateKey2 = dateKey;
+        const weekday = new Date(p.at).getDay();
+        const dayInfo = norm?.perDay?.[weekday];
+        if (dayInfo?.lunch) {
+          if (dIdx === 1 && p.action === "saida") {
+            lunchOutAt = new Date(p.at);
+          } else if (dIdx === 2 && p.action === "entrada" && lunchOutAt) {
+            const durationMin = (new Date(p.at) - lunchOutAt) / 60000;
+            const expectedMin = dayInfo.lunchMin ?? 30;
+            const tol = norm.tolerance ?? 10;
+            intervalCount++; intervalSum += durationMin;
+            if (durationMin > expectedMin + tol) longIntervals++;
+            else if (durationMin < expectedMin - tol) shortIntervals++;
+            lunchOutAt = null;
+          }
+        }
+      }
+    }
+    const avgIntervalMin = intervalCount ? Math.round(intervalSum / intervalCount) : null;
+
     const leaveDaysByType = {};
     leaves.filter(l => l.employeeId === emp.id).forEach(l => {
       if (l.endDate < monthStart || l.startDate > monthEnd) return;
@@ -199,7 +228,7 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType };
+    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount };
   });
 }
 
@@ -1760,8 +1789,14 @@ function ClosingTab({ employees, punches, leaves }) {
     return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
   }, [month]);
 
+  const REPEAT_THRESHOLD = 3; // a partir de quantas ocorrências no mês consideramos "recorrente"
+  const needsGuidance = useMemo(
+    () => summary.filter(s => s.longIntervals >= REPEAT_THRESHOLD || s.shortIntervals >= REPEAT_THRESHOLD),
+    [summary]
+  );
+
   const exportCSV = () => {
-    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Atrasos,Saídas antecipadas,Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
+    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Atrasos,Saídas antecipadas,Intervalos longos,Intervalos curtos,Duração média do intervalo (min),Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
     const body = summary.map(s => {
       const l = s.leaveDaysByType;
       return [
@@ -1771,6 +1806,9 @@ function ClosingTab({ employees, punches, leaves }) {
         fmtDuration(s.totalMin).replace("h", ":").padEnd(5, "0"),
         s.lateCount,
         s.earlyLeaveCount,
+        s.longIntervals,
+        s.shortIntervals,
+        s.avgIntervalMin ?? "",
         l.ferias || 0,
         l.atestado || 0,
         l.maternidade || 0,
@@ -1802,6 +1840,23 @@ function ClosingTab({ employees, punches, leaves }) {
         {importedTotal} registros importados do Pontomais no total ({importedThisMonth} neste mês).
       </div>
 
+      {needsGuidance.length > 0 && (
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.amberDim}`, borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 12, color: COLORS.amber, fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+            <AlertCircle size={14} /> Precisam de orientação sobre o intervalo
+          </div>
+          {needsGuidance.map(s => (
+            <div key={s.emp.id} style={{ fontSize: 13 }}>
+              <b>{s.emp.name}</b>:{" "}
+              {s.longIntervals >= REPEAT_THRESHOLD && `${s.longIntervals}x intervalo mais longo que o previsto`}
+              {s.longIntervals >= REPEAT_THRESHOLD && s.shortIntervals >= REPEAT_THRESHOLD && " · "}
+              {s.shortIntervals >= REPEAT_THRESHOLD && `${s.shortIntervals}x intervalo mais curto que o previsto`}
+              {s.avgIntervalMin != null && <span style={{ color: COLORS.textDim }}> (média: {s.avgIntervalMin}min)</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto" }}>
         {summary.length === 0 ? (
           <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum funcionário cadastrado.</div>
@@ -1809,7 +1864,7 @@ function ClosingTab({ employees, punches, leaves }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${COLORS.border}`, textAlign: "left" }}>
-                {["Funcionário", "Dias", "Horas", "Atrasos", "Saída ant.", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
+                {["Funcionário", "Dias", "Horas", "Atrasos", "Saída ant.", "Interv. longo", "Interv. curto", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
                   <th key={h} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -1822,6 +1877,8 @@ function ClosingTab({ employees, punches, leaves }) {
                   <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
                   <td style={{ padding: "8px 10px", color: s.lateCount ? COLORS.red : COLORS.textDim }}>{s.lateCount}</td>
                   <td style={{ padding: "8px 10px", color: s.earlyLeaveCount ? COLORS.amber : COLORS.textDim }}>{s.earlyLeaveCount}</td>
+                  <td style={{ padding: "8px 10px", color: s.longIntervals >= REPEAT_THRESHOLD ? COLORS.red : s.longIntervals ? COLORS.amber : COLORS.textDim, fontWeight: s.longIntervals >= REPEAT_THRESHOLD ? 700 : 400 }}>{s.longIntervals || "—"}</td>
+                  <td style={{ padding: "8px 10px", color: s.shortIntervals >= REPEAT_THRESHOLD ? COLORS.red : s.shortIntervals ? COLORS.amber : COLORS.textDim, fontWeight: s.shortIntervals >= REPEAT_THRESHOLD ? 700 : 400 }}>{s.shortIntervals || "—"}</td>
                   <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.ferias || "—"}</td>
                   <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.atestado || "—"}</td>
                   <td style={{ padding: "8px 10px" }}>{s.leaveDaysByType.maternidade || "—"}</td>
