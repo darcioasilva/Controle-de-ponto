@@ -13,7 +13,8 @@ const EMP_KEY = "ponto-employees";
 const PUNCH_KEY = "ponto-punches";
 const REQUEST_KEY = "ponto-requests";
 const LEAVE_KEY = "ponto-leaves";
-const ADMIN_PIN_KEY = "ponto-admin-pin";
+const ADMIN_PIN_KEY = "ponto-admin-pin"; // legado — migrado automaticamente para ADMIN_LIST_KEY
+const ADMIN_LIST_KEY = "ponto-admins";
 const STORE_COORDS_KEY = "ponto-store-coords";
 const DEFAULT_ADMIN_PIN = "9999";
 
@@ -336,7 +337,8 @@ export default function App() {
   const [punches, setPunches] = useState(null);
   const [requests, setRequests] = useState(null);
   const [leaves, setLeaves] = useState(null);
-  const [adminPin, setAdminPin] = useState(DEFAULT_ADMIN_PIN);
+  const [adminList, setAdminList] = useState(null);
+  const [currentAdmin, setCurrentAdmin] = useState(null);
   const [storeCoords, setStoreCoords] = useState({});
   const [store, setStore] = useState(STORES[0].id);
   const [now, setNow] = useState(new Date());
@@ -349,16 +351,28 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [emp, pun, req, lea, pin, coords] = await Promise.all([
+      const [emp, pun, req, lea, admins, legacyPin, coords] = await Promise.all([
         loadJSON(EMP_KEY, []),
         loadJSON(PUNCH_KEY, []),
         loadJSON(REQUEST_KEY, []),
         loadJSON(LEAVE_KEY, []),
-        loadJSON(ADMIN_PIN_KEY, DEFAULT_ADMIN_PIN),
+        loadJSON(ADMIN_LIST_KEY, null),
+        loadJSON(ADMIN_PIN_KEY, null),
         loadJSON(STORE_COORDS_KEY, {}),
       ]);
       setEmployees(emp); setPunches(pun); setRequests(req); setLeaves(lea);
-      setAdminPin(pin || DEFAULT_ADMIN_PIN); setStoreCoords(coords || {});
+      setStoreCoords(coords || {});
+      // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
+      // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
+      if (admins && admins.length > 0) {
+        const fixed = admins.map(a => a.id === "admin-1" ? { ...a, role: "master", name: a.name === "Admin" ? "Master" : a.name } : { ...a, role: a.role || "admin" });
+        setAdminList(fixed);
+        if (JSON.stringify(fixed) !== JSON.stringify(admins)) await saveJSON(ADMIN_LIST_KEY, fixed);
+      } else {
+        const initial = [{ id: "admin-1", name: "Master", pin: legacyPin || DEFAULT_ADMIN_PIN, role: "master" }];
+        setAdminList(initial);
+        await saveJSON(ADMIN_LIST_KEY, initial);
+      }
       setLoading(false);
     })();
   }, []);
@@ -368,7 +382,7 @@ export default function App() {
   const fetchLatestPunches = useCallback(async () => await loadJSON(PUNCH_KEY, []), []);
   const persistRequests = useCallback(async (next) => { setRequests(next); await saveJSON(REQUEST_KEY, next); }, []);
   const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
-  const persistAdminPin = useCallback(async (pin) => { setAdminPin(pin); await saveJSON(ADMIN_PIN_KEY, pin); }, []);
+  const persistAdminList = useCallback(async (next) => { setAdminList(next); await saveJSON(ADMIN_LIST_KEY, next); }, []);
   const persistStoreCoords = useCallback(async (next) => { setStoreCoords(next); await saveJSON(STORE_COORDS_KEY, next); }, []);
 
   if (loading) {
@@ -378,7 +392,7 @@ export default function App() {
   return (
     <div style={styles.appShell}>
       <GlobalStyle />
-      <TopBar store={store} setStore={setStore} view={view} setView={setView} />
+      <TopBar store={store} setStore={setStore} view={view} setView={setView} onBack={() => { setCurrentAdmin(null); setView("punch"); }} />
       <div style={styles.body}>
         {view === "punch" && (
           <PunchScreen
@@ -395,7 +409,7 @@ export default function App() {
           />
         )}
         {view === "admin-login" && (
-          <AdminLogin adminPin={adminPin} onSuccess={() => setView("admin")} onCancel={() => setView("punch")} />
+          <AdminLogin adminList={adminList} onSuccess={(admin) => { setCurrentAdmin(admin); setView("admin"); }} onCancel={() => setView("punch")} />
         )}
         {view === "admin" && (
           <AdminPanel
@@ -403,9 +417,9 @@ export default function App() {
             punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches}
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
-            adminPin={adminPin} persistAdminPin={persistAdminPin}
+            adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin}
             storeCoords={storeCoords} persistStoreCoords={persistStoreCoords}
-            onExit={() => setView("punch")}
+            onExit={() => { setCurrentAdmin(null); setView("punch"); }}
           />
         )}
       </div>
@@ -450,7 +464,7 @@ const styles = {
 };
 
 // ---------- Top bar ----------
-function TopBar({ store, setStore, view, setView }) {
+function TopBar({ store, setStore, view, setView, onBack }) {
   return (
     <div style={{
       display: "flex", alignItems: "center", justifyContent: "space-between",
@@ -473,7 +487,7 @@ function TopBar({ store, setStore, view, setView }) {
         </div>
       )}
       {view !== "punch" ? (
-        <button onClick={() => setView("punch")} style={ghostBtnStyle}><ChevronLeft size={16} /> Voltar</button>
+        <button onClick={onBack} style={ghostBtnStyle}><ChevronLeft size={16} /> Voltar</button>
       ) : (
         <button onClick={() => setView("admin-login")} style={ghostBtnStyle}><Lock size={14} /> Admin</button>
       )}
@@ -493,6 +507,8 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   const [error, setError] = useState(null);
   const [capturing, setCapturing] = useState(false);
   const [confirmState, setConfirmState] = useState(null); // { emp, nextAction, type, expected, diff }
+  const [pendingConfirm, setPendingConfirm] = useState(null); // { emp, nextAction } — confirmação simples antes de bater
+  const [blockState, setBlockState] = useState(null); // { reason, emp, nextAction, override, distance, radius } — bloqueio por localização
   const videoRef = useRef(null);
 
   const storeEmployees = useMemo(() => employees.filter(e => e.store === store && e.active !== false), [employees, store]);
@@ -517,12 +533,23 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
       captureSelfie(videoRef.current),
       getLocation(),
     ]);
-    setCapturing(false);
 
     const coords = storeCoords[store];
     const distance = coords && loc ? haversineMeters(coords, loc) : null;
     const outOfRange = distance != null && coords.radius ? distance > coords.radius : false;
 
+    if (coords && coords.radius && !loc) {
+      setCapturing(false);
+      setBlockState({ reason: "no_location", emp, nextAction, override });
+      return;
+    }
+    if (outOfRange) {
+      setCapturing(false);
+      setBlockState({ reason: "out_of_range", emp, nextAction, override, distance, radius: coords.radius });
+      return;
+    }
+
+    setCapturing(false);
     const record = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       employeeId: emp.id, employeeName: emp.name, store, action: nextAction, at: new Date().toISOString(),
@@ -535,22 +562,39 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     setTimeout(() => setFeedback(null), 3200);
   };
 
+  const retryAfterBlock = () => {
+    const { emp, nextAction, override } = blockState;
+    setBlockState(null);
+    finalizePunch(emp, nextAction, override);
+  };
+  const cancelBlock = () => { setBlockState(null); setPin(""); };
+
+  const proceedAfterConfirm = async (emp, nextAction) => {
+    const dayIdx = countTodayPunches(punches, emp.id);
+    const issue = checkTimingIssue(emp, nextAction, dayIdx);
+    if (issue) {
+      setConfirmState({ emp, nextAction, ...issue });
+      return;
+    }
+    await finalizePunch(emp, nextAction, null);
+  };
+
   const submitPin = async (fullPin) => {
     const emp = storeEmployees.find(e => e.pin === fullPin);
     if (!emp) { setError("PIN não encontrado nesta loja."); setPin(""); return; }
 
     const last = lastActionFor(emp.id);
     const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
-    const dayIdx = countTodayPunches(punches, emp.id);
-    const issue = checkTimingIssue(emp, nextAction, dayIdx);
-    if (issue) {
-      setConfirmState({ emp, nextAction, ...issue });
-      setPin("");
-      return;
-    }
     setPin("");
-    await finalizePunch(emp, nextAction, null);
+    setPendingConfirm({ emp, nextAction });
   };
+
+  const confirmPunch = async () => {
+    const { emp, nextAction } = pendingConfirm;
+    setPendingConfirm(null);
+    await proceedAfterConfirm(emp, nextAction);
+  };
+  const cancelPunch = () => setPendingConfirm(null);
 
   const confirmEarly = async () => {
     const { emp, nextAction, type } = confirmState;
@@ -568,7 +612,59 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
       <video ref={videoRef} muted playsInline style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
 
-      {confirmState ? (
+      {blockState ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
+            border: `1px solid ${COLORS.red}`, borderRadius: 20, padding: "36px 30px", width: "100%", maxWidth: 360,
+          }}>
+            <AlertCircle size={36} color={COLORS.red} style={{ marginBottom: 14 }} />
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, marginBottom: 8 }}>{blockState.emp.name}</div>
+            {blockState.reason === "out_of_range" ? (
+              <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+                Você está a <b style={{ color: COLORS.text }}>{blockState.distance}m</b> da loja (máximo permitido: {blockState.radius}m).
+                Aproxime-se da loja para bater o ponto.
+              </div>
+            ) : (
+              <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+                Não conseguimos confirmar sua localização. Verifique se o GPS/localização está ativado no aparelho e tente novamente.
+              </div>
+            )}
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button onClick={retryAfterBlock} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+                Tentar novamente
+              </button>
+              <button onClick={cancelBlock} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      ) : pendingConfirm ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
+            border: `1px solid ${pendingConfirm.nextAction === "entrada" ? COLORS.teal : COLORS.amber}`,
+            borderRadius: 20, padding: "40px 32px", width: "100%", maxWidth: 360,
+          }}>
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 22, fontWeight: 700, marginBottom: 10 }}>{pendingConfirm.emp.name}</div>
+            <div style={{
+              color: pendingConfirm.nextAction === "entrada" ? COLORS.teal : COLORS.amber,
+              fontWeight: 700, fontSize: 16, textTransform: "uppercase", letterSpacing: 1, marginBottom: 22,
+            }}>
+              Confirmar {pendingConfirm.nextAction === "entrada" ? "entrada" : "saída"}?
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <button onClick={confirmPunch} style={{
+                ...ghostBtnStyle, justifyContent: "center",
+                background: pendingConfirm.nextAction === "entrada" ? COLORS.teal : COLORS.amber,
+                color: "#0E1A18", borderColor: "transparent", fontWeight: 700,
+              }}>
+                Confirmar
+              </button>
+              <button onClick={cancelPunch} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Cancelar</button>
+            </div>
+          </div>
+        </div>
+      ) : confirmState ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{
             textAlign: "center", animation: "popIn 0.25s ease-out", background: COLORS.surface,
@@ -840,15 +936,17 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 const fieldLabel = { fontSize: 12, color: COLORS.textDim, marginBottom: 6 };
 
 // ---------- Admin login ----------
-function AdminLogin({ adminPin, onSuccess, onCancel }) {
+function AdminLogin({ adminList, onSuccess, onCancel }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
+  const maxLen = Math.max(...adminList.map(a => a.pin.length), 4);
   const handleDigit = (d) => {
     if (pin.length >= 6) return;
     const next = pin + d; setPin(next);
-    if (next.length >= adminPin.length) {
-      if (next === adminPin) onSuccess();
-      else { setError(true); setTimeout(() => { setPin(""); setError(false); }, 500); }
+    const match = adminList.find(a => a.pin === next);
+    if (match) { onSuccess(match); return; }
+    if (next.length >= maxLen) {
+      setError(true); setTimeout(() => { setPin(""); setError(false); }, 500);
     }
   };
   return (
@@ -869,13 +967,12 @@ function AdminLogin({ adminPin, onSuccess, onCancel }) {
         <div />
       </div>
       <button onClick={onCancel} style={{ ...ghostBtnStyle, marginTop: 8 }}>Cancelar</button>
-      <div style={{ color: COLORS.textDim, fontSize: 12, maxWidth: 260, textAlign: "center" }}>PIN padrão: 9999. Altere em Configurações depois de entrar.</div>
     </div>
   );
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminPin, persistAdminPin, storeCoords, persistStoreCoords, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, onExit }) {
   const [tab, setTab] = useState("records");
   const pendingCount = requests.filter(r => r.status === "pendente").length;
   const todayKey = fmtDateKey(new Date());
@@ -883,6 +980,9 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, animation: "slideUp 0.2s ease-out" }}>
+      {currentAdmin && (
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>Conectado como <b style={{ color: COLORS.text }}>{currentAdmin.name}</b></div>
+      )}
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <TabBtn icon={ListChecks} label="Registros" active={tab === "records"} onClick={() => setTab("records")} />
         <TabBtn icon={Inbox} label="Solicitações" badge={pendingCount} active={tab === "requests"} onClick={() => setTab("requests")} />
@@ -893,12 +993,12 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
       {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} fetchLatestPunches={fetchLatestPunches} />}
-      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
+      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} currentAdmin={currentAdmin} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} />}
-      {tab === "settings" && <SettingsTab adminPin={adminPin} persistAdminPin={persistAdminPin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
     </div>
   );
 }
@@ -1124,7 +1224,7 @@ function DaySummary({ punches, filterStore, filterDate }) {
 }
 
 // ---- Requests tab ----
-function RequestsTab({ requests, persistRequests, punches, persistPunches, fetchLatestPunches }) {
+function RequestsTab({ requests, persistRequests, punches, persistPunches, fetchLatestPunches, currentAdmin }) {
   const [filter, setFilter] = useState("pendente");
   const [expanded, setExpanded] = useState(null);
   const [adjustingId, setAdjustingId] = useState(null);
@@ -1137,8 +1237,10 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
     .filter(r => filter === "all" || r.status === filter)
     .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)), [requests, filter]);
 
+  const byWhom = currentAdmin ? ` (por ${currentAdmin.name})` : "";
+
   const setStatus = async (id, status, adminNote = "") => {
-    await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote, resolvedAt: new Date().toISOString() } : r));
+    await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote: adminNote + byWhom, resolvedAt: new Date().toISOString() } : r));
   };
 
   const openAdjust = (r) => {
@@ -1853,14 +1955,25 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminPin, persistAdminPin, storeCoords, persistStoreCoords }) {
-  const [newPin, setNewPin] = useState(""); const [saved, setSaved] = useState(false);
+function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
+  const [showAddAdmin, setShowAddAdmin] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [adminErr, setAdminErr] = useState("");
+  const isMaster = currentAdmin?.role === "master";
 
-  const save = async () => {
-    if (!/^\d{4,6}$/.test(newPin)) return;
-    await persistAdminPin(newPin); setSaved(true); setNewPin(""); setTimeout(() => setSaved(false), 1800);
+  const addAdmin = async () => {
+    if (!newName.trim()) { setAdminErr("Informe o nome."); return; }
+    if (!/^\d{4,6}$/.test(newPin)) { setAdminErr("PIN precisa ter de 4 a 6 dígitos."); return; }
+    if (adminList.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
+    await persistAdminList([...adminList, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin" }]);
+    setNewName(""); setNewPin(""); setAdminErr(""); setShowAddAdmin(false);
+  };
+  const removeAdmin = async (id) => {
+    if (adminList.length <= 1) return;
+    await persistAdminList(adminList.filter(a => a.id !== id));
   };
 
   const useCurrentLocation = async (storeId) => {
@@ -1874,11 +1987,42 @@ function SettingsTab({ adminPin, persistAdminPin, storeCoords, persistStoreCoord
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 340 }}>
-        <div style={{ fontSize: 13, color: COLORS.textDim }}>Alterar PIN de administrador</div>
-        <input placeholder="Novo PIN (4 a 6 dígitos)" value={newPin} onChange={e => setNewPin(e.target.value.replace(/\D/g, ""))} style={selectStyle} />
-        <button onClick={save} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, alignSelf: "flex-start" }}>Salvar novo PIN</button>
-        {saved && <div style={{ color: COLORS.teal, fontSize: 12 }}>PIN atualizado.</div>}
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 380 }}>
+        <div style={{ fontSize: 13, color: COLORS.textDim }}>Administradores</div>
+        {adminList.map(a => (
+          <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 600, fontSize: 14, display: "flex", alignItems: "center", gap: 6 }}>
+                {a.name}
+                {a.role === "master" && (
+                  <span style={{ fontSize: 10, color: COLORS.amber, border: `1px solid ${COLORS.amberDim}`, borderRadius: 20, padding: "1px 7px", fontWeight: 700 }}>MASTER</span>
+                )}
+                {currentAdmin?.id === a.id && <span style={{ color: COLORS.teal, fontSize: 11 }}>(você)</span>}
+              </div>
+              <div style={{ color: COLORS.textDim, fontSize: 12, fontFamily: FONT_MONO }}>PIN {a.pin}</div>
+            </div>
+            {isMaster && a.role !== "master" && adminList.length > 1 && (
+              <button onClick={() => removeAdmin(a.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={15} /></button>
+            )}
+          </div>
+        ))}
+        {!isMaster ? (
+          <div style={{ color: COLORS.textDim, fontSize: 12 }}>Só o administrador Master pode criar ou remover outros administradores.</div>
+        ) : !showAddAdmin ? (
+          <button onClick={() => setShowAddAdmin(true)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, alignSelf: "flex-start" }}>
+            <Plus size={14} /> Novo administrador
+          </button>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, borderTop: `1px solid ${COLORS.border}`, paddingTop: 10 }}>
+            <input placeholder="Nome" value={newName} onChange={e => setNewName(e.target.value)} style={selectStyle} />
+            <input placeholder="PIN (4 a 6 dígitos)" value={newPin} maxLength={6} onChange={e => setNewPin(e.target.value.replace(/\D/g, ""))} style={selectStyle} />
+            {adminErr && <div style={{ color: COLORS.red, fontSize: 12 }}>{adminErr}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={addAdmin} style={{ ...ghostBtnStyle, background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>Salvar</button>
+              <button onClick={() => { setShowAddAdmin(false); setAdminErr(""); }} style={ghostBtnStyle}>Cancelar</button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 14, maxWidth: 420 }}>
