@@ -15,6 +15,8 @@ const REQUEST_KEY = "ponto-requests";
 const LEAVE_KEY = "ponto-leaves";
 const ADMIN_PIN_KEY = "ponto-admin-pin"; // legado — migrado automaticamente para ADMIN_LIST_KEY
 const ADMIN_LIST_KEY = "ponto-admins";
+const OVERTIME_CODE_KEY = "ponto-overtime-code";
+const OVERTIME_CODE_VALID_MIN = 30; // minutos de validade do código gerado
 const STORE_COORDS_KEY = "ponto-store-coords";
 const DEFAULT_ADMIN_PIN = "9999";
 
@@ -339,6 +341,7 @@ export default function App() {
   const [leaves, setLeaves] = useState(null);
   const [adminList, setAdminList] = useState(null);
   const [currentAdmin, setCurrentAdmin] = useState(null);
+  const [overtimeCode, setOvertimeCode] = useState(null);
   const [storeCoords, setStoreCoords] = useState({});
   const [store, setStore] = useState(STORES[0].id);
   const [now, setNow] = useState(new Date());
@@ -351,7 +354,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [emp, pun, req, lea, admins, legacyPin, coords] = await Promise.all([
+      const [emp, pun, req, lea, admins, legacyPin, coords, otCode] = await Promise.all([
         loadJSON(EMP_KEY, []),
         loadJSON(PUNCH_KEY, []),
         loadJSON(REQUEST_KEY, []),
@@ -359,9 +362,11 @@ export default function App() {
         loadJSON(ADMIN_LIST_KEY, null),
         loadJSON(ADMIN_PIN_KEY, null),
         loadJSON(STORE_COORDS_KEY, {}),
+        loadJSON(OVERTIME_CODE_KEY, null),
       ]);
       setEmployees(emp); setPunches(pun); setRequests(req); setLeaves(lea);
       setStoreCoords(coords || {});
+      setOvertimeCode(otCode || null);
       // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
       // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
       if (admins && admins.length > 0) {
@@ -384,6 +389,8 @@ export default function App() {
   const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
   const persistAdminList = useCallback(async (next) => { setAdminList(next); await saveJSON(ADMIN_LIST_KEY, next); }, []);
   const persistStoreCoords = useCallback(async (next) => { setStoreCoords(next); await saveJSON(STORE_COORDS_KEY, next); }, []);
+  const persistOvertimeCode = useCallback(async (next) => { setOvertimeCode(next); await saveJSON(OVERTIME_CODE_KEY, next); }, []);
+  const fetchLatestOvertimeCode = useCallback(async () => await loadJSON(OVERTIME_CODE_KEY, null), []);
 
   if (loading) {
     return <div style={styles.appShell}><div style={{ color: COLORS.textDim, fontFamily: FONT_UI, padding: 24 }}>Carregando…</div></div>;
@@ -397,7 +404,7 @@ export default function App() {
         {view === "punch" && (
           <PunchScreen
             employees={employees} punches={punches} persistPunches={persistPunches}
-            store={store} now={now} storeCoords={storeCoords}
+            store={store} now={now} storeCoords={storeCoords} fetchLatestOvertimeCode={fetchLatestOvertimeCode} persistOvertimeCode={persistOvertimeCode}
             onRequest={() => setView("request")}
           />
         )}
@@ -419,6 +426,7 @@ export default function App() {
             leaves={leaves} persistLeaves={persistLeaves}
             adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin}
             storeCoords={storeCoords} persistStoreCoords={persistStoreCoords}
+            overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode}
             onExit={() => { setCurrentAdmin(null); setView("punch"); }}
           />
         )}
@@ -501,7 +509,7 @@ const ghostBtnStyle = {
 };
 
 // ---------- Punch screen ----------
-function PunchScreen({ employees, punches, persistPunches, store, now, storeCoords, onRequest }) {
+function PunchScreen({ employees, punches, persistPunches, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, onRequest }) {
   const [pin, setPin] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [error, setError] = useState(null);
@@ -509,6 +517,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   const [confirmState, setConfirmState] = useState(null); // { emp, nextAction, type, expected, diff }
   const [pendingConfirm, setPendingConfirm] = useState(null); // { emp, nextAction } — confirmação simples antes de bater
   const [blockState, setBlockState] = useState(null); // { reason, emp, nextAction, override, distance, radius } — bloqueio por localização
+  const [waitMessage, setWaitMessage] = useState(null); // horário esperado, exibido quando cancela a entrada antecipada
   const videoRef = useRef(null);
 
   const storeEmployees = useMemo(() => employees.filter(e => e.store === store && e.active !== false), [employees, store]);
@@ -595,6 +604,11 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     await proceedAfterConfirm(emp, nextAction);
   };
   const cancelPunch = () => setPendingConfirm(null);
+  const specialExit = async () => {
+    const { emp } = pendingConfirm;
+    setPendingConfirm(null);
+    await finalizePunch(emp, "saida", "saida_definitiva_outro_motivo");
+  };
 
   const confirmEarly = async () => {
     const { emp, nextAction, type } = confirmState;
@@ -606,13 +620,56 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     };
     await finalizePunch(emp, nextAction, overrideMap[type] || null);
   };
-  const cancelEarly = () => setConfirmState(null);
+  const cancelEarly = () => { setConfirmState(null); setOvertimePinInput(""); setOvertimeError(false); };
+  const cancelEarlyEntry = (expected) => {
+    setConfirmState(null); setOvertimePinInput(""); setOvertimeError(false);
+    setWaitMessage(expected);
+  };
+
+  const [overtimePinInput, setOvertimePinInput] = useState("");
+  const [overtimeError, setOvertimeError] = useState(false);
+  const handleOvertimeDigit = (d) => {
+    setOvertimeError(false);
+    if (overtimePinInput.length >= 4) return;
+    const next = overtimePinInput + d;
+    setOvertimePinInput(next);
+    if (next.length === 4) {
+      setTimeout(async () => {
+        const active = await fetchLatestOvertimeCode();
+        const stillValid = active && !active.used && new Date(active.expiresAt) > new Date();
+        if (stillValid && next === active.code) {
+          setOvertimePinInput("");
+          await persistOvertimeCode({ ...active, used: true, usedAt: new Date().toISOString(), usedBy: confirmState?.emp?.name });
+          confirmEarly();
+        } else {
+          setOvertimeError(true);
+          setTimeout(() => { setOvertimePinInput(""); setOvertimeError(false); }, 600);
+        }
+      }, 100);
+    }
+  };
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
       <video ref={videoRef} muted playsInline style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
 
-      {blockState ? (
+      {waitMessage ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
+            border: `1px solid ${COLORS.border}`, borderRadius: 20, padding: "36px 30px", width: "100%", maxWidth: 360,
+          }}>
+            <Clock size={32} color={COLORS.amber} style={{ marginBottom: 14 }} />
+            <div style={{ fontSize: 15, lineHeight: 1.5, marginBottom: 20 }}>
+              Solicite um código ao seu superior.<br />
+              Aguarde até <b style={{ color: COLORS.amber, fontFamily: FONT_MONO }}>{waitMessage}</b>hs para iniciar sua jornada de trabalho.
+            </div>
+            <button onClick={() => setWaitMessage(null)} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+              Entendi
+            </button>
+          </div>
+        </div>
+      ) : blockState ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{
             textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
@@ -661,6 +718,11 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
                 Confirmar
               </button>
               <button onClick={cancelPunch} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Cancelar</button>
+              {pendingConfirm.nextAction === "saida" && (
+                <button onClick={specialExit} style={{ ...ghostBtnStyle, justifyContent: "center", fontSize: 12, color: COLORS.red, borderColor: COLORS.red }}>
+                  Saída por outro motivo (doença, família etc.)
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -675,15 +737,31 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
             {confirmState.type === "early_entry" ? (
               <>
                 <div style={{ fontSize: 14, marginBottom: 6 }}>Ainda é muito cedo para bater o ponto.</div>
-                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
-                  Sua entrada é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Você tem autorização para hora extra?
+                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 14 }}>
+                  Sua entrada é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Só é possível entrar antes com o código de autorização gerado pelo administrador.
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <button onClick={confirmEarly} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
-                    Sim, tenho autorização
-                  </button>
-                  <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center" }}>Não, vou aguardar</button>
+                <div style={{ display: "flex", gap: 10, justifyContent: "center", marginBottom: 14 }}>
+                  {[0, 1, 2, 3].map(i => (
+                    <div key={i} style={{
+                      width: 38, height: 46, borderRadius: 9,
+                      border: `1.5px solid ${overtimeError ? COLORS.red : COLORS.border}`,
+                      background: COLORS.surfaceRaised, display: "flex", alignItems: "center", justifyContent: "center",
+                      fontFamily: FONT_MONO, fontSize: 20, fontWeight: 700,
+                    }}>{overtimePinInput[i] ? "•" : ""}</div>
+                  ))}
                 </div>
+                {overtimeError && (
+                  <div style={{ color: COLORS.red, fontSize: 12, marginBottom: 10 }}>Código incorreto ou expirado.</div>
+                )}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 52px)", gap: 8, justifyContent: "center", marginBottom: 14 }}>
+                  {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map(d => (
+                    <button key={d} onClick={() => handleOvertimeDigit(d)} style={{ ...numKeyStyle, width: 52, height: 52, fontSize: 17 }}>{d}</button>
+                  ))}
+                  <button onClick={() => setOvertimePinInput("")} style={{ ...numKeyStyle, width: 52, height: 52, fontSize: 11, color: COLORS.textDim }}>Limpar</button>
+                  <button onClick={() => handleOvertimeDigit("0")} style={{ ...numKeyStyle, width: 52, height: 52, fontSize: 17 }}>0</button>
+                  <div />
+                </div>
+                <button onClick={() => cancelEarlyEntry(confirmState.expected)} style={{ ...ghostBtnStyle, justifyContent: "center", width: "100%" }}>Não, vou aguardar</button>
               </>
             ) : confirmState.type === "late_entry" ? (
               <>
@@ -972,7 +1050,7 @@ function AdminLogin({ adminList, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
   const [tab, setTab] = useState("records");
   const pendingCount = requests.filter(r => r.status === "pendente").length;
   const todayKey = fmtDateKey(new Date());
@@ -998,7 +1076,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} />}
-      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
     </div>
   );
 }
@@ -1127,12 +1205,13 @@ function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPun
                 <div style={{ color: COLORS.textDim, fontSize: 12 }}>
                   {STORES.find(s => s.id === p.store)?.label} · {p.action === "entrada" ? "Entrada" : "Saída"} · {fmtDate(new Date(p.at))}
                 </div>
-                {status && (
-                  <div style={{ fontSize: 11, color: status.color, marginTop: 2, fontWeight: 600 }}>
-                    {status.label}
+                {(status || p.earlyOverride === "saida_definitiva_outro_motivo") && (
+                  <div style={{ fontSize: 11, color: p.earlyOverride === "saida_definitiva_outro_motivo" ? COLORS.red : status?.color, marginTop: 2, fontWeight: 600 }}>
+                    {status?.label}
                     {p.earlyOverride === "hora_extra_autorizada" && " · Hora extra autorizada pelo funcionário"}
                     {p.earlyOverride === "entrada_atrasada_confirmada" && " · Entrada atrasada confirmada pelo funcionário"}
                     {p.earlyOverride === "saida_antecipada_confirmada" && " · Confirmado pelo funcionário"}
+                    {p.earlyOverride === "saida_definitiva_outro_motivo" && "Saída por outro motivo — aguardando justificativa"}
                   </div>
                 )}
               </div>
@@ -1955,7 +2034,7 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords }) {
+function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, overtimeCode, persistOvertimeCode }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
   const [showAddAdmin, setShowAddAdmin] = useState(false);
@@ -2060,6 +2139,14 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
         )}
       </div>
 
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 380 }}>
+        <div style={{ fontSize: 13, color: COLORS.textDim }}>Código de hora extra (entrada antes do horário)</div>
+        <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+          Gere um código na hora e passe por telefone/WhatsApp pra quem precisar entrar antes do horário. Vale só uma vez e expira em {OVERTIME_CODE_VALID_MIN} minutos.
+        </div>
+        <OvertimeCodeGenerator overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} currentAdmin={currentAdmin} />
+      </div>
+
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 14, maxWidth: 420 }}>
         <div style={{ fontSize: 13, color: COLORS.textDim }}>Localização das lojas (para validar geolocalização do ponto)</div>
         {STORES.map(s => (
@@ -2089,6 +2176,50 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
       <div style={{ color: COLORS.textDim, fontSize: 12, maxWidth: 420 }}>
         Os dados (funcionários, registros, solicitações e fotos) ficam salvos automaticamente e são compartilhados entre todos os dispositivos que abrirem este app.
       </div>
+    </div>
+  );
+}
+
+function OvertimeCodeGenerator({ overtimeCode, persistOvertimeCode, currentAdmin }) {
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => forceTick(n => n + 1), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const now = new Date();
+  const isActive = overtimeCode && !overtimeCode.used && new Date(overtimeCode.expiresAt) > now;
+  const minutesLeft = isActive ? Math.max(0, Math.ceil((new Date(overtimeCode.expiresAt) - now) / 60000)) : 0;
+
+  const generate = async () => {
+    const code = String(Math.floor(1000 + Math.random() * 9000));
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt.getTime() + OVERTIME_CODE_VALID_MIN * 60000);
+    await persistOvertimeCode({
+      code, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString(),
+      used: false, generatedBy: currentAdmin?.name || "Admin",
+    });
+  };
+
+  if (isActive) {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        <div style={{ fontFamily: FONT_MONO, fontSize: 32, fontWeight: 700, letterSpacing: 4, color: COLORS.amber }}>{overtimeCode.code}</div>
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>Válido por mais {minutesLeft} min · gerado por {overtimeCode.generatedBy}</div>
+        <button onClick={generate} style={{ ...ghostBtnStyle, alignSelf: "flex-start", fontSize: 12, padding: "6px 10px" }}>Gerar novo código (invalida este)</button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {overtimeCode?.used && (
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>
+          Último código já foi usado por {overtimeCode.usedBy || "um funcionário"}.
+        </div>
+      )}
+      <button onClick={generate} style={{ ...ghostBtnStyle, alignSelf: "flex-start", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber }}>
+        Gerar código de hora extra
+      </button>
     </div>
   );
 }
