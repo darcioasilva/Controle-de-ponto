@@ -2259,6 +2259,7 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
     setLocating(null);
   };
   const updateRadius = (storeId, radius) => setLocalCoords(prev => ({ ...prev, [storeId]: { ...(prev[storeId] || {}), radius: Number(radius) || 0 } }));
+  const updateManualCoord = (storeId, field, value) => setLocalCoords(prev => ({ ...prev, [storeId]: { ...(prev[storeId] || {}), [field]: value === "" ? undefined : Number(value) } }));
   const saveCoords = async () => {
     // Busca a versão mais recente salva antes de gravar, e só sobrescreve a(s) loja(s)
     // que esse administrador realmente pode editar — evita apagar a configuração de outra loja.
@@ -2361,11 +2362,16 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
               <button onClick={() => useCurrentLocation(s.id)} style={{ ...ghostBtnStyle, fontSize: 12, padding: "6px 10px" }}>
                 <MapPin size={13} /> {locating === s.id ? "Obtendo…" : "Usar localização atual"}
               </button>
-              {localCoords[s.id]?.lat && (
+              {localCoords[s.id]?.lat != null && localCoords[s.id]?.lng != null && (
                 <span style={{ fontSize: 11, color: COLORS.textDim, fontFamily: FONT_MONO }}>
                   {localCoords[s.id].lat.toFixed(5)}, {localCoords[s.id].lng.toFixed(5)}
                 </span>
               )}
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: COLORS.textDim }}>Ou digite manualmente:</span>
+              <input type="number" step="0.00001" placeholder="Latitude" value={localCoords[s.id]?.lat ?? ""} onChange={e => updateManualCoord(s.id, "lat", e.target.value)} style={{ ...selectStyle, width: 130 }} />
+              <input type="number" step="0.00001" placeholder="Longitude" value={localCoords[s.id]?.lng ?? ""} onChange={e => updateManualCoord(s.id, "lng", e.target.value)} style={{ ...selectStyle, width: 130 }} />
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
               <span style={{ fontSize: 12, color: COLORS.textDim }}>Raio permitido</span>
