@@ -313,6 +313,22 @@ function checkTimingIssue(employee, action, dayIdx = 0) {
 }
 
 // ---------- Geo / image helpers ----------
+// Identifica esse aparelho de forma persistente (fica salvo só neste navegador/celular),
+// usado para vincular um funcionário ao próprio celular quando essa exigência estiver ativa.
+function getDeviceId() {
+  try {
+    const key = "ponto-device-id";
+    let id = window.localStorage.getItem(key);
+    if (!id) {
+      id = (crypto.randomUUID ? crypto.randomUUID() : `dev-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      window.localStorage.setItem(key, id);
+    }
+    return id;
+  } catch (e) {
+    return null; // navegador sem suporte a localStorage (ex: modo privado restrito)
+  }
+}
+
 function getLocation(timeoutMs = 6000) {
   return new Promise((resolve) => {
     if (!navigator.geolocation) { resolve(null); return; }
@@ -451,7 +467,7 @@ export default function App() {
       <div style={styles.body}>
         {view === "punch" && (
           <PunchScreen
-            employees={employees} punches={punches} persistPunches={persistPunches}
+            employees={employees} punches={punches} persistPunches={persistPunches} persistEmployees={persistEmployees}
             store={store} now={now} storeCoords={storeCoords} fetchLatestOvertimeCode={fetchLatestOvertimeCode} persistOvertimeCode={persistOvertimeCode}
             onRequest={() => setView("request")}
           />
@@ -557,7 +573,7 @@ const ghostBtnStyle = {
 };
 
 // ---------- Punch screen ----------
-function PunchScreen({ employees, punches, persistPunches, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, onRequest }) {
+function PunchScreen({ employees, punches, persistPunches, persistEmployees, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, onRequest }) {
   const [pin, setPin] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [error, setError] = useState(null);
@@ -637,12 +653,25 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
   const submitPin = async (fullPin) => {
     const emp = storeEmployees.find(e => e.pin === fullPin);
     if (!emp) { setError("PIN não encontrado nesta loja."); setPin(""); return; }
+    setPin("");
+
+    if (emp.requireDeviceLock) {
+      const deviceId = getDeviceId();
+      if (!emp.registeredDeviceId) {
+        // Primeira vez desse funcionário batendo ponto: vincula este aparelho a ele automaticamente
+        await persistEmployees(employees.map(e => e.id === emp.id ? { ...e, registeredDeviceId: deviceId } : e));
+      } else if (emp.registeredDeviceId !== deviceId) {
+        setDeviceBlock(emp);
+        return;
+      }
+    }
 
     const last = lastActionFor(emp.id);
     const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
-    setPin("");
     setPendingConfirm({ emp, nextAction });
   };
+
+  const [deviceBlock, setDeviceBlock] = useState(null);
 
   const confirmPunch = async () => {
     const { emp, nextAction } = pendingConfirm;
@@ -700,7 +729,21 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
       <video ref={videoRef} muted playsInline style={{ display: "none" }} />
 
-      {waitMessage ? (
+      {deviceBlock ? (
+        <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{
+            textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
+            border: `1px solid ${COLORS.red}`, borderRadius: 20, padding: "36px 30px", width: "100%", maxWidth: 360,
+          }}>
+            <AlertCircle size={36} color={COLORS.red} style={{ marginBottom: 14 }} />
+            <div style={{ fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, marginBottom: 8 }}>{deviceBlock.name}</div>
+            <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 18 }}>
+              Este aparelho não é o cadastrado para você. Peça a um administrador para liberar um novo aparelho em Funcionários.
+            </div>
+            <button onClick={() => setDeviceBlock(null)} style={{ ...ghostBtnStyle, justifyContent: "center", width: "100%" }}>Entendi</button>
+          </div>
+        </div>
+      ) : waitMessage ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
           <div style={{
             textAlign: "center", animation: "popIn 0.2s ease-out", background: COLORS.surface,
@@ -2039,6 +2082,12 @@ function EmployeesTab({ employees, persistEmployees, restrictedStore }) {
     setName(""); setPin(""); setErr(""); setRefPhoto(null); setShowForm(false);
   };
   const toggleActive = async (id) => { await persistEmployees(employees.map(e => e.id === id ? { ...e, active: !(e.active !== false) } : e)); };
+  const toggleDeviceLock = async (id) => {
+    await persistEmployees(employees.map(e => e.id === id ? { ...e, requireDeviceLock: !e.requireDeviceLock, registeredDeviceId: null } : e));
+  };
+  const releaseDevice = async (id) => {
+    await persistEmployees(employees.map(e => e.id === id ? { ...e, registeredDeviceId: null } : e));
+  };
   const removeEmployee = async (id) => { await persistEmployees(employees.filter(e => e.id !== id)); };
   const saveSchedule = async (id, schedule) => {
     await persistEmployees(employees.map(e => e.id === id ? { ...e, schedule } : e));
@@ -2105,6 +2154,22 @@ function EmployeesTab({ employees, persistEmployees, restrictedStore }) {
                     ) : (
                       <div style={{ color: COLORS.textDim, fontSize: 11, marginTop: 2 }}>Sem horário definido</div>
                     )}
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4, fontSize: 11, color: COLORS.textDim }}>
+                      <input type="checkbox" checked={!!e.requireDeviceLock} onChange={() => toggleDeviceLock(e.id)} />
+                      Exigir aparelho próprio
+                      {e.requireDeviceLock && (
+                        e.registeredDeviceId ? (
+                          <>
+                            <span style={{ color: COLORS.teal }}>· Aparelho vinculado</span>
+                            <button onClick={() => releaseDevice(e.id)} style={{ background: "none", border: "none", color: COLORS.amber, textDecoration: "underline", padding: 0, fontSize: 11 }}>
+                              Liberar novo aparelho
+                            </button>
+                          </>
+                        ) : (
+                          <span style={{ color: COLORS.amber }}>· Ainda não vinculado (vincula no 1º ponto)</span>
+                        )
+                      )}
+                    </label>
                   </div>
                   <button onClick={() => setEditingSchedule(editingSchedule === e.id ? null : e.id)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}>
                     <Clock size={12} /> Horário
