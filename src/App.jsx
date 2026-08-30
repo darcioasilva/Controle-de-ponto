@@ -289,7 +289,11 @@ function checkTimingIssue(employee, action, dayIdx = 0) {
   const now = new Date();
   const day = now.getDay();
   const info = norm.perDay[day];
-  if (!info) return null;
+  if (!info) {
+    // Dia marcado como folga: bloqueia a primeira batida do dia (a entrada), exigindo autorização
+    if (action === "entrada" && dayIdx === 0) return { type: "day_off" };
+    return null;
+  }
   const hasLunch = !!info.lunch;
   // Pontos de ida/volta do almoço não são checados contra o horário de entrada/saída do dia
   if (hasLunch && (dayIdx === 1 || dayIdx === 2)) return null;
@@ -659,6 +663,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
       early_entry: "hora_extra_autorizada",
       late_entry: "entrada_atrasada_confirmada",
       early_exit: "saida_antecipada_confirmada",
+      day_off: "trabalho_dia_folga_autorizado",
     };
     await finalizePunch(emp, nextAction, overrideMap[type] || null);
   };
@@ -776,12 +781,17 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
           }}>
             <AlertCircle size={36} color={COLORS.amber} style={{ marginBottom: 14 }} />
             <div style={{ fontFamily: FONT_DISPLAY, fontSize: 19, fontWeight: 700, marginBottom: 8 }}>{confirmState.emp.name}</div>
-            {confirmState.type === "early_entry" ? (
+            {(confirmState.type === "early_entry" || confirmState.type === "day_off") ? (
               <>
-                <div style={{ fontSize: 14, marginBottom: 6 }}>Ainda é muito cedo para bater o ponto.</div>
-                <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 14 }}>
-                  Sua entrada é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Só é possível entrar antes com o código de autorização gerado pelo administrador.
-                </div>
+                {confirmState.type === "day_off" ? (
+                  <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 14 }}>
+                    Hoje é seu dia de folga. Só é possível bater o ponto com o código de autorização gerado pelo administrador.
+                  </div>
+                ) : (
+                  <div style={{ color: COLORS.textDim, fontSize: 13, marginBottom: 14 }}>
+                    Sua entrada é às <b style={{ color: COLORS.text }}>{confirmState.expected}</b>. Só é possível entrar antes com o código de autorização gerado pelo administrador.
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 10, justifyContent: "center", marginBottom: 14 }}>
                   {[0, 1, 2, 3].map(i => (
                     <div key={i} style={{
@@ -803,7 +813,11 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
                   <button onClick={() => handleOvertimeDigit("0")} style={{ ...numKeyStyle, width: 52, height: 52, fontSize: 17 }}>0</button>
                   <div />
                 </div>
-                <button onClick={() => cancelEarlyEntry(confirmState.expected)} style={{ ...ghostBtnStyle, justifyContent: "center", width: "100%" }}>Não, vou aguardar</button>
+                {confirmState.type === "day_off" ? (
+                  <button onClick={cancelEarly} style={{ ...ghostBtnStyle, justifyContent: "center", width: "100%" }}>Cancelar</button>
+                ) : (
+                  <button onClick={() => cancelEarlyEntry(confirmState.expected)} style={{ ...ghostBtnStyle, justifyContent: "center", width: "100%" }}>Não, vou aguardar</button>
+                )}
               </>
             ) : confirmState.type === "late_entry" ? (
               <>
@@ -1267,6 +1281,7 @@ function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPun
                     {p.earlyOverride === "entrada_atrasada_confirmada" && " · Entrada atrasada confirmada pelo funcionário"}
                     {p.earlyOverride === "saida_antecipada_confirmada" && " · Confirmado pelo funcionário"}
                     {p.earlyOverride === "saida_definitiva_outro_motivo" && "Saída por outro motivo — aguardando justificativa"}
+                    {p.earlyOverride === "trabalho_dia_folga_autorizado" && " · Trabalho em dia de folga, autorizado"}
                   </div>
                 )}
               </div>
