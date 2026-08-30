@@ -581,10 +581,8 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
 
   const finalizePunch = async (emp, nextAction, override) => {
     setCapturing(true);
-    const [photo, loc] = await Promise.all([
-      captureSelfie(videoRef.current),
-      getLocation(),
-    ]);
+    const photo = null;
+    const loc = await getLocation();
 
     const coords = storeCoords[store];
     const distance = coords && loc ? haversineMeters(coords, loc) : null;
@@ -694,7 +692,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column" }}>
-      <video ref={videoRef} muted playsInline style={{ position: "absolute", width: 1, height: 1, opacity: 0, pointerEvents: "none" }} />
+      <video ref={videoRef} muted playsInline style={{ display: "none" }} />
 
       {waitMessage ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -837,11 +835,10 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
         </div>
       ) : capturing ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 14 }}>
-          <div style={{ animation: "pulse 1s ease-in-out infinite", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 }}>
-            <Camera size={30} color={COLORS.amber} />
-            <MapPin size={22} color={COLORS.textDim} />
+          <div style={{ animation: "pulse 1s ease-in-out infinite" }}>
+            <MapPin size={30} color={COLORS.amber} />
           </div>
-          <div style={{ color: COLORS.textDim, fontSize: 13 }}>Registrando foto e localização…</div>
+          <div style={{ color: COLORS.textDim, fontSize: 13 }}>Registrando localização…</div>
         </div>
       ) : feedback ? (
         <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -903,7 +900,7 @@ function PunchScreen({ employees, punches, persistPunches, store, now, storeCoor
             <div />
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLORS.textDim, fontSize: 11 }}>
-            <Camera size={12} /> Ao bater o ponto, uma foto e a localização são registradas
+            <MapPin size={12} /> Ao bater o ponto, a localização é registrada
           </div>
           <button onClick={onRequest} style={{ ...ghostBtnStyle, marginTop: 4 }}>
             <FileText size={14} /> Solicitar ajuste / enviar atestado
