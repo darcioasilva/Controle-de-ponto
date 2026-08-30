@@ -432,6 +432,7 @@ export default function App() {
   const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
   const persistAdminList = useCallback(async (next) => { setAdminList(next); await saveJSON(ADMIN_LIST_KEY, next); }, []);
   const persistStoreCoords = useCallback(async (next) => { setStoreCoords(next); await saveJSON(STORE_COORDS_KEY, next); }, []);
+  const fetchLatestStoreCoords = useCallback(async () => await loadJSON(STORE_COORDS_KEY, {}), []);
   const persistOvertimeCode = useCallback(async (next) => { setOvertimeCode(next); await saveJSON(OVERTIME_CODE_KEY, next); }, []);
   const fetchLatestOvertimeCode = useCallback(async () => await loadJSON(OVERTIME_CODE_KEY, null), []);
 
@@ -468,7 +469,7 @@ export default function App() {
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
             adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin}
-            storeCoords={storeCoords} persistStoreCoords={persistStoreCoords}
+            storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords}
             overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode}
             onExit={() => { setCurrentAdmin(null); setView("punch"); }}
           />
@@ -1090,7 +1091,7 @@ function AdminLogin({ adminList, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
   const [tab, setTab] = useState("records");
   const restrictedStore = currentAdmin && currentAdmin.role !== "master" ? currentAdmin.store : null;
 
@@ -1126,7 +1127,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} restrictedStore={restrictedStore} />}
-      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
     </div>
   );
 }
@@ -2198,7 +2199,7 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, overtimeCode, persistOvertimeCode }) {
+function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
   const [showAddAdmin, setShowAddAdmin] = useState(false);
@@ -2243,7 +2244,16 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
     setLocating(null);
   };
   const updateRadius = (storeId, radius) => setLocalCoords(prev => ({ ...prev, [storeId]: { ...(prev[storeId] || {}), radius: Number(radius) || 0 } }));
-  const saveCoords = async () => { await persistStoreCoords(localCoords); };
+  const saveCoords = async () => {
+    // Busca a versão mais recente salva antes de gravar, e só sobrescreve a(s) loja(s)
+    // que esse administrador realmente pode editar — evita apagar a configuração de outra loja.
+    const latest = await fetchLatestStoreCoords();
+    const editableStores = restrictedStore ? [restrictedStore] : STORES.map(s => s.id);
+    const merged = { ...latest };
+    editableStores.forEach(id => { merged[id] = localCoords[id]; });
+    await persistStoreCoords(merged);
+    setLocalCoords(merged);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -2329,7 +2339,7 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
 
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 14, maxWidth: 420 }}>
         <div style={{ fontSize: 13, color: COLORS.textDim }}>Localização das lojas (para validar geolocalização do ponto)</div>
-        {STORES.map(s => (
+        {STORES.filter(s => !restrictedStore || s.id === restrictedStore).map(s => (
           <div key={s.id} style={{ borderTop: `1px solid ${COLORS.border}`, paddingTop: 10 }}>
             <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>{s.label}</div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
