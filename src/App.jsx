@@ -468,7 +468,7 @@ export default function App() {
         {view === "punch" && (
           <PunchScreen
             employees={employees} punches={punches} persistPunches={persistPunches} persistEmployees={persistEmployees}
-            store={store} now={now} storeCoords={storeCoords} fetchLatestOvertimeCode={fetchLatestOvertimeCode} persistOvertimeCode={persistOvertimeCode}
+            store={store} now={now} storeCoords={storeCoords} fetchLatestOvertimeCode={fetchLatestOvertimeCode} persistOvertimeCode={persistOvertimeCode} fetchLatestPunches={fetchLatestPunches}
             onRequest={() => setView("request")}
           />
         )}
@@ -573,7 +573,7 @@ const ghostBtnStyle = {
 };
 
 // ---------- Punch screen ----------
-function PunchScreen({ employees, punches, persistPunches, persistEmployees, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, onRequest }) {
+function PunchScreen({ employees, punches, persistPunches, persistEmployees, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, fetchLatestPunches, onRequest }) {
   const [pin, setPin] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [error, setError] = useState(null);
@@ -585,11 +585,6 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
   const videoRef = useRef(null);
 
   const storeEmployees = useMemo(() => employees.filter(e => e.store === store && e.active !== false), [employees, store]);
-
-  const lastActionFor = useCallback((empId) => {
-    const list = punches.filter(p => p.employeeId === empId).sort((a, b) => new Date(b.at) - new Date(a.at));
-    return list[0] || null;
-  }, [punches]);
 
   const handleDigit = (d) => {
     setError(null);
@@ -627,7 +622,10 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
       photo: photo || null, location: loc || null, distance, outOfRange,
       earlyOverride: override || null,
     };
-    await persistPunches([...punches, record]);
+    // Busca a versão mais recente salva no banco antes de gravar, pra não perder pontos
+    // batidos em outro aparelho enquanto este ficou aberto sem atualizar.
+    const latest = await fetchLatestPunches();
+    await persistPunches([...latest, record]);
     setFeedback({ name: emp.name, action: nextAction, time: new Date(), photo, hasLocation: !!loc, outOfRange });
     setPin("");
     setTimeout(() => setFeedback(null), 3200);
@@ -641,7 +639,8 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
   const cancelBlock = () => { setBlockState(null); setPin(""); };
 
   const proceedAfterConfirm = async (emp, nextAction) => {
-    const dayIdx = countTodayPunches(punches, emp.id);
+    const latest = await fetchLatestPunches();
+    const dayIdx = countTodayPunches(latest, emp.id);
     const issue = checkTimingIssue(emp, nextAction, dayIdx);
     if (issue) {
       setConfirmState({ emp, nextAction, ...issue });
@@ -666,7 +665,11 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
       }
     }
 
-    const last = lastActionFor(emp.id);
+    // Busca a versão mais atual dos pontos pra decidir entrada/saída corretamente,
+    // mesmo que este aparelho esteja com a tela aberta há um tempo sem atualizar.
+    const latest = await fetchLatestPunches();
+    const empPunches = latest.filter(p => p.employeeId === emp.id).sort((a, b) => new Date(b.at) - new Date(a.at));
+    const last = empPunches[0] || null;
     const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
     setPendingConfirm({ emp, nextAction });
   };
