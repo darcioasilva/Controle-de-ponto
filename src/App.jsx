@@ -42,6 +42,23 @@ async function loadJSON(key, fallback) {
     return fallback;
   }
 }
+// Igual ao loadJSON, mas distingue "a chave realmente não existe ainda" de "a consulta falhou"
+// (rede instável, servidor fora do ar). Usado só onde uma leitura vazia dispara a criação
+// automática de dados padrão — pra nunca confundir uma falha de rede com "está tudo vazio"
+// e sobrescrever dados reais com um valor inicial.
+async function loadJSONRaw(key) {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/ponto_kv?key=eq.${encodeURIComponent(key)}&select=value`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return { ok: false };
+    const data = await res.json();
+    return { ok: true, value: (data && data.length > 0) ? data[0].value : null };
+  } catch (e) {
+    return { ok: false };
+  }
+}
 async function saveJSON(key, value) {
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/ponto_kv`, {
@@ -417,12 +434,12 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [emp, pun, req, lea, admins, legacyPin, coords, otCode] = await Promise.all([
+      const [emp, pun, req, lea, adminsRaw, legacyPin, coords, otCode] = await Promise.all([
         loadJSON(EMP_KEY, []),
         loadJSON(PUNCH_KEY, []),
         loadJSON(REQUEST_KEY, []),
         loadJSON(LEAVE_KEY, []),
-        loadJSON(ADMIN_LIST_KEY, null),
+        loadJSONRaw(ADMIN_LIST_KEY),
         loadJSON(ADMIN_PIN_KEY, null),
         loadJSON(STORE_COORDS_KEY, {}),
         loadJSON(OVERTIME_CODE_KEY, null),
@@ -432,14 +449,23 @@ export default function App() {
       setOvertimeCode(otCode || null);
       // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
       // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
-      if (admins && admins.length > 0) {
+      // Importante: só criamos (e gravamos) uma lista nova quando a consulta teve sucesso e realmente
+      // veio vazia — nunca quando a consulta falhou (rede/servidor), pra não confundir uma falha
+      // temporária com "não existe nada ainda" e apagar os administradores reais por cima.
+      if (adminsRaw.ok && adminsRaw.value && adminsRaw.value.length > 0) {
+        const admins = adminsRaw.value;
         const fixed = admins.map(a => a.id === "admin-1" ? { ...a, role: "master", name: a.name === "Admin" ? "Master" : a.name } : { ...a, role: a.role || "admin" });
         setAdminList(fixed);
         if (JSON.stringify(fixed) !== JSON.stringify(admins)) await saveJSON(ADMIN_LIST_KEY, fixed);
-      } else {
+      } else if (adminsRaw.ok) {
+        // Consulta funcionou e realmente não há nenhuma lista salva ainda — primeira vez de verdade.
         const initial = [{ id: "admin-1", name: "Master", pin: legacyPin || DEFAULT_ADMIN_PIN, role: "master" }];
         setAdminList(initial);
         await saveJSON(ADMIN_LIST_KEY, initial);
+      } else {
+        // A consulta falhou — não sabemos se existe lista ou não. Não grava nada; só usa
+        // uma lista vazia temporariamente nesta sessão até conseguir ler de novo.
+        setAdminList([]);
       }
       setLoading(false);
     })();
@@ -451,6 +477,7 @@ export default function App() {
   const persistRequests = useCallback(async (next) => { setRequests(next); await saveJSON(REQUEST_KEY, next); }, []);
   const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
   const persistAdminList = useCallback(async (next) => { setAdminList(next); await saveJSON(ADMIN_LIST_KEY, next); }, []);
+  const fetchLatestAdminList = useCallback(async () => await loadJSON(ADMIN_LIST_KEY, []), []);
   const persistStoreCoords = useCallback(async (next) => { setStoreCoords(next); await saveJSON(STORE_COORDS_KEY, next); }, []);
   const fetchLatestStoreCoords = useCallback(async () => await loadJSON(STORE_COORDS_KEY, {}), []);
   const persistOvertimeCode = useCallback(async (next) => { setOvertimeCode(next); await saveJSON(OVERTIME_CODE_KEY, next); }, []);
@@ -488,7 +515,7 @@ export default function App() {
             punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches}
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
-            adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin}
+            adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin}
             storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords}
             overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode}
             onExit={() => { setCurrentAdmin(null); setView("punch"); }}
@@ -1151,7 +1178,7 @@ function AdminLogin({ adminList, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
   const [tab, setTab] = useState("records");
   const restrictedStore = currentAdmin && currentAdmin.role !== "master" ? currentAdmin.store : null;
 
@@ -1187,7 +1214,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} restrictedStore={restrictedStore} />}
-      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
     </div>
   );
 }
@@ -2282,7 +2309,7 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode }) {
+function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
   const [showAddAdmin, setShowAddAdmin] = useState(false);
@@ -2295,13 +2322,15 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
   const addAdmin = async () => {
     if (!newName.trim()) { setAdminErr("Informe o nome."); return; }
     if (!/^\d{4,6}$/.test(newPin)) { setAdminErr("PIN precisa ter de 4 a 6 dígitos."); return; }
-    if (adminList.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
-    await persistAdminList([...adminList, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin", store: newStore }]);
+    const latest = await fetchLatestAdminList();
+    if (latest.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
+    await persistAdminList([...latest, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin", store: newStore }]);
     setNewName(""); setNewPin(""); setNewStore(STORES[0].id); setAdminErr(""); setShowAddAdmin(false);
   };
   const removeAdmin = async (id) => {
-    if (adminList.length <= 1) return;
-    await persistAdminList(adminList.filter(a => a.id !== id));
+    const latest = await fetchLatestAdminList();
+    if (latest.length <= 1) return;
+    await persistAdminList(latest.filter(a => a.id !== id));
   };
 
   const [editingId, setEditingId] = useState(null);
@@ -2314,9 +2343,11 @@ function SettingsTab({ adminList, persistAdminList, currentAdmin, storeCoords, p
   const saveEditAdmin = async (id) => {
     if (!editName.trim()) { setEditErr("Informe o nome."); return; }
     if (!/^\d{4,6}$/.test(editPin)) { setEditErr("PIN precisa ter de 4 a 6 dígitos."); return; }
-    if (adminList.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
-    const target = adminList.find(a => a.id === id);
-    await persistAdminList(adminList.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin, ...(target?.role !== "master" ? { store: editStore } : {}) } : a));
+    const latest = await fetchLatestAdminList();
+    if (latest.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
+    const target = latest.find(a => a.id === id);
+    if (!target) { setEditErr("Esse administrador não existe mais — atualize a página."); return; }
+    await persistAdminList(latest.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin, ...(target.role !== "master" ? { store: editStore } : {}) } : a));
     setEditingId(null); setEditErr("");
   };
 
