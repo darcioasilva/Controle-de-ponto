@@ -174,17 +174,36 @@ function formatScheduleSummary(schedule) {
 }
 
 // Calcula o fechamento mensal (horas, atrasos, faltas e ausências) por funcionário
-function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey) {
-  const [y, m] = monthKey.split("-").map(Number);
-  const lastDay = new Date(y, m, 0).getDate();
-  const monthStart = `${monthKey}-01`;
-  const monthEnd = `${monthKey}-${pad2(lastDay)}`;
+// Soma quantos minutos de trabalho são esperados de um funcionário entre duas datas,
+// com base no horário cadastrado dele (descontando o intervalo de almoço, se houver)
+function computeExpectedMinutes(schedule, startISO, endISO) {
+  const norm = normalizeSchedule(schedule);
+  if (!norm) return 0;
+  let total = 0;
+  const d = new Date(startISO + "T00:00:00");
+  const end = new Date(endISO + "T00:00:00");
+  while (d <= end) {
+    const info = norm.perDay[d.getDay()];
+    if (info) {
+      const entrada = timeToMinutes(info.entrada), saida = timeToMinutes(info.saida);
+      if (entrada != null && saida != null) {
+        const lunch = info.lunch ? (info.lunchMin ?? 30) : 0;
+        total += Math.max(saida - entrada - lunch, 0);
+      }
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return total;
+}
 
+// Calcula o fechamento (horas, atrasos, faltas e ausências) por funcionário, num período
+// livre (startISO a endISO, ambos "AAAA-MM-DD")
+function computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO) {
   const empList = employees.filter(e => storeFilter === "all" || e.store === storeFilter);
 
   return empList.map(emp => {
     const empPunches = punches
-      .filter(p => p.employeeId === emp.id && p.at.slice(0, 7) === monthKey)
+      .filter(p => p.employeeId === emp.id && p.at.slice(0, 10) >= startISO && p.at.slice(0, 10) <= endISO)
       .sort((a, b) => new Date(a.at) - new Date(b.at));
 
     let totalMin = 0;
@@ -252,14 +271,16 @@ function computeMonthlySummary(punches, leaves, employees, storeFilter, monthKey
 
     const leaveDaysByType = {};
     leaves.filter(l => l.employeeId === emp.id).forEach(l => {
-      if (l.endDate < monthStart || l.startDate > monthEnd) return;
-      const start = l.startDate < monthStart ? monthStart : l.startDate;
-      const end = l.endDate > monthEnd ? monthEnd : l.endDate;
+      if (l.endDate < startISO || l.startDate > endISO) return;
+      const start = l.startDate < startISO ? startISO : l.startDate;
+      const end = l.endDate > endISO ? endISO : l.endDate;
       const days = Math.round((new Date(end + "T00:00:00") - new Date(start + "T00:00:00")) / 86400000) + 1;
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    return { emp, totalMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails, punchDetails };
+    const expectedMin = computeExpectedMinutes(emp.schedule, startISO, endISO);
+
+    return { emp, totalMin, expectedMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails, punchDetails };
   });
 }
 
@@ -1904,39 +1925,57 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
 
 // ---- Fechamento mensal (para contabilidade) ----
 function ClosingTab({ employees, punches, leaves, restrictedStore }) {
+  const [periodType, setPeriodType] = useState("month"); // month | custom
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
+  const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
+  const [customEnd, setCustomEnd] = useState(fmtDateKey(new Date()));
   const [storeFilter, setStoreFilter] = useState(restrictedStore || "all");
   const [expandedEmp, setExpandedEmp] = useState(null);
   const [detailView, setDetailView] = useState("punches"); // punches | intervals
 
+  const { startISO, endISO } = useMemo(() => {
+    if (periodType === "month") {
+      const [y, m] = month.split("-").map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      return { startISO: `${month}-01`, endISO: `${month}-${pad2(lastDay)}` };
+    }
+    return { startISO: customStart, endISO: customEnd };
+  }, [periodType, month, customStart, customEnd]);
+
   const importedTotal = useMemo(() => punches.filter(p => p.importedFrom === "pontomais").length, [punches]);
-  const importedThisMonth = useMemo(
-    () => punches.filter(p => p.importedFrom === "pontomais" && p.at.slice(0, 7) === month).length,
-    [punches, month]
+  const importedInPeriod = useMemo(
+    () => punches.filter(p => p.importedFrom === "pontomais" && p.at.slice(0, 10) >= startISO && p.at.slice(0, 10) <= endISO).length,
+    [punches, startISO, endISO]
   );
 
-  const summary = useMemo(() => computeMonthlySummary(punches, leaves, employees, storeFilter, month), [punches, leaves, employees, storeFilter, month]);
+  const summary = useMemo(() => computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO), [punches, leaves, employees, storeFilter, startISO, endISO]);
 
-  const monthLabel = useMemo(() => {
-    const [y, m] = month.split("-").map(Number);
-    return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
-  }, [month]);
+  const periodLabel = useMemo(() => {
+    if (periodType === "month") {
+      const [y, m] = month.split("-").map(Number);
+      return new Date(y, m - 1, 1).toLocaleDateString("pt-BR", { month: "long", year: "numeric" });
+    }
+    return `${fmtDate(new Date(customStart + "T00:00:00"))} a ${fmtDate(new Date(customEnd + "T00:00:00"))}`;
+  }, [periodType, month, customStart, customEnd]);
 
-  const REPEAT_THRESHOLD = 3; // a partir de quantas ocorrências no mês consideramos "recorrente"
+  const REPEAT_THRESHOLD = 3; // a partir de quantas ocorrências no período consideramos "recorrente"
   const needsGuidance = useMemo(
     () => summary.filter(s => s.longIntervals >= REPEAT_THRESHOLD || s.shortIntervals >= REPEAT_THRESHOLD),
     [summary]
   );
 
   const exportCSV = () => {
-    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Atrasos,Saídas antecipadas,Intervalos longos,Intervalos curtos,Duração média do intervalo (min),Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
+    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Horas previstas,Saldo,Atrasos,Saídas antecipadas,Intervalos longos,Intervalos curtos,Duração média do intervalo (min),Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
     const body = summary.map(s => {
       const l = s.leaveDaysByType;
+      const delta = s.totalMin - s.expectedMin;
       return [
         s.emp.name,
         STORES.find(st => st.id === s.emp.store)?.label || s.emp.store,
         s.daysWorked,
         fmtDuration(s.totalMin).replace("h", ":").padEnd(5, "0"),
+        fmtDuration(s.expectedMin).replace("h", ":").padEnd(5, "0"),
+        (delta >= 0 ? "+" : "-") + fmtDuration(Math.abs(delta)).replace("h", ":").padEnd(5, "0"),
         s.lateCount,
         s.earlyLeaveCount,
         s.longIntervals,
@@ -1952,14 +1991,32 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
     const blob = new Blob([header + body], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `fechamento-${month}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
+    a.href = url; a.download = `fechamento-${startISO}-a-${endISO}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
     URL.revokeObjectURL(url);
   };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        {[["month", "Mês"], ["custom", "Personalizado"]].map(([v, l]) => (
+          <button key={v} onClick={() => setPeriodType(v)} style={{
+            ...ghostBtnStyle, padding: "6px 10px", fontSize: 12,
+            background: periodType === v ? COLORS.surfaceRaised : "transparent",
+            borderColor: periodType === v ? COLORS.border : "transparent",
+            color: periodType === v ? COLORS.text : COLORS.textDim,
+          }}>{l}</button>
+        ))}
+      </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-        <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={selectStyle} />
+        {periodType === "month" ? (
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={selectStyle} />
+        ) : (
+          <>
+            <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} style={selectStyle} />
+            <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+            <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} style={selectStyle} />
+          </>
+        )}
         {restrictedStore ? (
           <div style={{ ...selectStyle, color: COLORS.textDim }}>{STORES.find(s => s.id === restrictedStore)?.label}</div>
         ) : (
@@ -1972,9 +2029,9 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
           <Download size={14} /> Exportar CSV para contabilidade
         </button>
       </div>
-      <div style={{ color: COLORS.textDim, fontSize: 12, textTransform: "capitalize" }}>{monthLabel}</div>
+      <div style={{ color: COLORS.textDim, fontSize: 12, textTransform: "capitalize" }}>{periodLabel}</div>
       <div style={{ color: COLORS.textDim, fontSize: 11 }}>
-        {importedTotal} registros importados do Pontomais no total ({importedThisMonth} neste mês).
+        {importedTotal} registros importados do Pontomais no total ({importedInPeriod} neste período).
       </div>
 
       {needsGuidance.length > 0 && (
@@ -2001,7 +2058,7 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 640 }}>
             <thead>
               <tr style={{ borderBottom: `1px solid ${COLORS.border}`, textAlign: "left" }}>
-                {["Funcionário", "Dias", "Horas", "Atrasos", "Saída ant.", "Interv. longo", "Interv. curto", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
+                {["Funcionário", "Dias", "Horas", "Previstas", "Saldo", "Atrasos", "Saída ant.", "Interv. longo", "Interv. curto", "Férias", "Atestado", "Matern.", "Patern.", "Outras"].map(h => (
                   <th key={h} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, whiteSpace: "nowrap" }}>{h}</th>
                 ))}
               </tr>
@@ -2014,6 +2071,10 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
                   <td style={{ padding: "8px 10px", fontWeight: 600 }}>{s.emp.name}</td>
                   <td style={{ padding: "8px 10px" }}>{s.daysWorked}</td>
                   <td style={{ padding: "8px 10px", fontFamily: FONT_MONO }}>{fmtDuration(s.totalMin)}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtDuration(s.expectedMin)}</td>
+                  <td style={{ padding: "8px 10px", fontFamily: FONT_MONO, fontWeight: 700, color: (s.totalMin - s.expectedMin) >= 0 ? COLORS.teal : COLORS.red }}>
+                    {(s.totalMin - s.expectedMin) >= 0 ? "+" : "-"}{fmtDuration(Math.abs(s.totalMin - s.expectedMin))}
+                  </td>
                   <td style={{ padding: "8px 10px", color: s.lateCount ? COLORS.red : COLORS.textDim }}>{s.lateCount}</td>
                   <td style={{ padding: "8px 10px", color: s.earlyLeaveCount ? COLORS.amber : COLORS.textDim }}>{s.earlyLeaveCount}</td>
                   <td style={{ padding: "8px 10px", color: s.longIntervals >= REPEAT_THRESHOLD ? COLORS.red : s.longIntervals ? COLORS.amber : COLORS.textDim, fontWeight: s.longIntervals >= REPEAT_THRESHOLD ? 700 : 400 }}>{s.longIntervals || "—"}</td>
@@ -2026,7 +2087,7 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
                 </tr>
                 {expandedEmp === s.emp.id && (
                   <tr>
-                    <td colSpan={12} style={{ padding: "0 10px 12px 10px", background: COLORS.surfaceRaised }}>
+                    <td colSpan={14} style={{ padding: "0 10px 12px 10px", background: COLORS.surfaceRaised }}>
                       <div style={{ display: "flex", gap: 8, margin: "10px 0 8px" }}>
                         <button onClick={(e) => { e.stopPropagation(); setDetailView("punches"); }} style={{
                           ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
