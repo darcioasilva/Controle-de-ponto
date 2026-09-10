@@ -518,6 +518,7 @@ export default function App() {
             employees={employees} punches={punches} persistPunches={persistPunches} persistEmployees={persistEmployees}
             store={store} now={now} storeCoords={storeCoords} fetchLatestOvertimeCode={fetchLatestOvertimeCode} persistOvertimeCode={persistOvertimeCode} fetchLatestPunches={fetchLatestPunches}
             onRequest={() => setView("request")}
+            onMyPunches={() => setView("mypunches")}
           />
         )}
         {view === "request" && (
@@ -525,6 +526,12 @@ export default function App() {
             employees={employees} store={store}
             persistRequests={persistRequests} requests={requests}
             onDone={() => setView("punch")}
+          />
+        )}
+        {view === "mypunches" && (
+          <MyPunchesScreen
+            employees={employees} punches={punches} requests={requests} leaves={leaves} store={store}
+            onExit={() => setView("punch")}
           />
         )}
         {view === "admin-login" && (
@@ -621,7 +628,7 @@ const ghostBtnStyle = {
 };
 
 // ---------- Punch screen ----------
-function PunchScreen({ employees, punches, persistPunches, persistEmployees, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, fetchLatestPunches, onRequest }) {
+function PunchScreen({ employees, punches, persistPunches, persistEmployees, store, now, storeCoords, fetchLatestOvertimeCode, persistOvertimeCode, fetchLatestPunches, onRequest, onMyPunches }) {
   const [pin, setPin] = useState("");
   const [feedback, setFeedback] = useState(null);
   const [error, setError] = useState(null);
@@ -1011,9 +1018,14 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
           <div style={{ display: "flex", alignItems: "center", gap: 6, color: COLORS.textDim, fontSize: 11 }}>
             <MapPin size={12} /> Ao bater o ponto, a localização é registrada
           </div>
-          <button onClick={onRequest} style={{ ...ghostBtnStyle, marginTop: 4 }}>
-            <FileText size={14} /> Solicitar ajuste / enviar atestado
-          </button>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", marginTop: 4 }}>
+            <button onClick={onRequest} style={ghostBtnStyle}>
+              <FileText size={14} /> Solicitar ajuste / enviar atestado
+            </button>
+            <button onClick={onMyPunches} style={ghostBtnStyle}>
+              <ListChecks size={14} /> Ver meus pontos
+            </button>
+          </div>
           {storeEmployees.length === 0 && (
             <div style={{ color: COLORS.textDim, fontSize: 13, textAlign: "center", maxWidth: 280 }}>
               Nenhum funcionário cadastrado nesta loja ainda. Entre em Admin para cadastrar.
@@ -1161,6 +1173,198 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 }
 
 const fieldLabel = { fontSize: 12, color: COLORS.textDim, marginBottom: 6 };
+
+// ---------- Meus Pontos (visão do próprio funcionário) ----------
+function MyPunchesScreen({ employees, punches, requests, leaves, store, onExit }) {
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState(false);
+  const [emp, setEmp] = useState(null);
+
+  const handleDigit = (d) => {
+    if (pin.length >= 4) return;
+    const next = pin + d;
+    setPin(next);
+    if (next.length === 4) {
+      setTimeout(() => {
+        const found = employees.find(e => e.pin === next && e.store === store && e.active !== false);
+        if (found) { setEmp(found); setPin(""); }
+        else { setError(true); setTimeout(() => { setPin(""); setError(false); }, 500); }
+      }, 120);
+    }
+  };
+  const handleClear = () => { setPin(""); setError(false); };
+
+  if (emp) {
+    return <MyPunchesDetail emp={emp} punches={punches} requests={requests} leaves={leaves} onExit={() => setEmp(null)} onFullExit={onExit} />;
+  }
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 22, padding: "20px 0" }}>
+      <ListChecks size={28} color={COLORS.textDim} />
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, marginBottom: 4 }}>Meus pontos</div>
+        <div style={{ color: COLORS.textDim, fontSize: 13 }}>Digite seu PIN pra ver seu histórico</div>
+      </div>
+      <div style={{ display: "flex", gap: 12 }}>
+        {[0, 1, 2, 3].map(i => (
+          <div key={i} style={{
+            width: 44, height: 54, borderRadius: 10, border: `1.5px solid ${error ? COLORS.red : COLORS.border}`,
+            background: COLORS.surface, display: "flex", alignItems: "center", justifyContent: "center",
+            fontFamily: FONT_MONO, fontSize: 24, fontWeight: 700,
+          }}>{pin[i] ? "•" : ""}</div>
+        ))}
+      </div>
+      {error && <div style={{ color: COLORS.red, fontSize: 13 }}>PIN não encontrado nesta loja.</div>}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 68px)", gap: 12 }}>
+        {["1", "2", "3", "4", "5", "6", "7", "8", "9"].map(d => <NumKey key={d} label={d} onClick={() => handleDigit(d)} />)}
+        <button onClick={handleClear} style={{ ...numKeyStyle, color: COLORS.textDim, fontSize: 13 }}>Limpar</button>
+        <NumKey label="0" onClick={() => handleDigit("0")} />
+        <div />
+      </div>
+      <button onClick={onExit} style={ghostBtnStyle}><ChevronLeft size={14} /> Voltar</button>
+    </div>
+  );
+}
+
+const INACTIVITY_MS = 90000; // fecha sozinho depois de 90s sem uso (protege dispositivo compartilhado)
+
+function MyPunchesDetail({ emp, punches, requests, leaves, onExit, onFullExit }) {
+  const [tab, setTab] = useState("pontos");
+  const [periodType, setPeriodType] = useState("week"); // week | month | custom
+  const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
+  const [customEnd, setCustomEnd] = useState(fmtDateKey(new Date()));
+
+  useEffect(() => {
+    let timer = setTimeout(onFullExit, INACTIVITY_MS);
+    const reset = () => { clearTimeout(timer); timer = setTimeout(onFullExit, INACTIVITY_MS); };
+    const events = ["mousedown", "touchstart", "keydown", "scroll"];
+    events.forEach(ev => window.addEventListener(ev, reset));
+    return () => { clearTimeout(timer); events.forEach(ev => window.removeEventListener(ev, reset)); };
+  }, [onFullExit]);
+
+  const { startISO, endISO } = useMemo(() => {
+    const today = fmtDateKey(new Date());
+    if (periodType === "week") {
+      const s = new Date(); s.setDate(s.getDate() - 6);
+      return { startISO: fmtDateKey(s), endISO: today };
+    }
+    if (periodType === "month") {
+      return { startISO: today.slice(0, 8) + "01", endISO: today };
+    }
+    return { startISO: customStart, endISO: customEnd };
+  }, [periodType, customStart, customEnd]);
+
+  const summary = useMemo(
+    () => computePeriodSummary(punches, leaves, [emp], "all", startISO, endISO)[0],
+    [punches, leaves, emp, startISO, endISO]
+  );
+  const mainPunches = useMemo(() => summary.punchDetails.filter(d => d.statusLabel !== "Intervalo"), [summary]);
+  const myRequests = useMemo(
+    () => requests.filter(r => r.employeeId === emp.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
+    [requests, emp]
+  );
+  const deltaMin = summary.totalMin - summary.expectedMin;
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <div style={{ fontFamily: FONT_DISPLAY, fontSize: 20, fontWeight: 700 }}>Olá, {emp.name.split(" ")[0]}</div>
+        <div style={{ color: COLORS.textDim, fontSize: 12 }}>{STORES.find(s => s.id === emp.store)?.label}</div>
+      </div>
+
+      <div style={{ display: "flex", gap: 8 }}>
+        <button onClick={() => setTab("pontos")} style={{
+          ...ghostBtnStyle, flex: 1, justifyContent: "center",
+          background: tab === "pontos" ? COLORS.surfaceRaised : "transparent",
+          color: tab === "pontos" ? COLORS.text : COLORS.textDim,
+        }}><ListChecks size={14} /> Meus pontos</button>
+        <button onClick={() => setTab("solicitacoes")} style={{
+          ...ghostBtnStyle, flex: 1, justifyContent: "center",
+          background: tab === "solicitacoes" ? COLORS.surfaceRaised : "transparent",
+          color: tab === "solicitacoes" ? COLORS.text : COLORS.textDim,
+        }}><Inbox size={14} /> Minhas solicitações</button>
+      </div>
+
+      {tab === "pontos" ? (
+        <>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {[["week", "Últimos 7 dias"], ["month", "Este mês"], ["custom", "Personalizado"]].map(([v, l]) => (
+              <button key={v} onClick={() => setPeriodType(v)} style={{
+                ...ghostBtnStyle, padding: "6px 10px", fontSize: 12,
+                background: periodType === v ? COLORS.surfaceRaised : "transparent",
+                color: periodType === v ? COLORS.text : COLORS.textDim,
+              }}>{l}</button>
+            ))}
+          </div>
+          {periodType === "custom" && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="date" value={customStart} onChange={e => setCustomStart(e.target.value)} style={selectStyle} />
+              <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+              <input type="date" value={customEnd} onChange={e => setCustomEnd(e.target.value)} style={selectStyle} />
+            </div>
+          )}
+
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 14, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ color: COLORS.textDim, fontSize: 12 }}>Trabalhadas no período</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 700 }}>{fmtDuration(summary.totalMin)}</div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ color: COLORS.textDim, fontSize: 12 }}>Previstas no período</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 14, color: COLORS.textDim }}>{fmtDuration(summary.expectedMin)}</div>
+            </div>
+            <div style={{ height: 1, background: COLORS.border, margin: "2px 0" }} />
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <div style={{ fontSize: 12, fontWeight: 600 }}>{deltaMin >= 0 ? "Saldo positivo" : "Saldo negativo"}</div>
+              <div style={{ fontFamily: FONT_MONO, fontSize: 18, fontWeight: 700, color: deltaMin >= 0 ? COLORS.teal : COLORS.red }}>
+                {deltaMin >= 0 ? "+" : "-"}{fmtDuration(Math.abs(deltaMin))}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+            {mainPunches.length === 0 ? (
+              <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum ponto nesse período.</div>
+            ) : mainPunches.map((p, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, padding: "10px 14px", alignItems: "center", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                <span style={{ width: 76, fontSize: 13, fontWeight: 600 }}>{fmtDate(new Date(p.date + "T00:00:00"))}</span>
+                <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 58 }}>{p.time.slice(0, 5)}</span>
+                <span style={{ width: 60, fontSize: 12, color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>
+                  {p.action === "entrada" ? "Entrada" : "Saída"}
+                </span>
+                <span style={{ fontSize: 11, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+          {myRequests.length === 0 ? (
+            <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhuma solicitação enviada ainda.</div>
+          ) : myRequests.map((r, i) => (
+            <div key={r.id} style={{ padding: "12px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontWeight: 600, fontSize: 14 }}>{REQUEST_TYPES.find(t => t.id === r.type)?.label || r.type}</span>
+                <StatusPill status={r.status} />
+              </div>
+              <div style={{ color: COLORS.textDim, fontSize: 12, marginTop: 2 }}>ref. {fmtDate(new Date(r.date + "T00:00:00"))}</div>
+              <div style={{ fontSize: 13, marginTop: 4 }}>{r.note}</div>
+              {r.adminNote && <div style={{ fontSize: 12, color: COLORS.textDim, marginTop: 6, fontStyle: "italic" }}>{r.adminNote}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <button onClick={onExit} style={{ ...ghostBtnStyle, justifyContent: "center", marginTop: 4 }}>
+        <ChevronLeft size={14} /> Sair
+      </button>
+      <div style={{ color: COLORS.textDim, fontSize: 11, textAlign: "center" }}>
+        Por segurança, essa tela fecha sozinha depois de um tempo sem uso.
+      </div>
+    </div>
+  );
+}
+
 
 // ---------- Admin login ----------
 function AdminLogin({ adminList, onSuccess, onCancel }) {
