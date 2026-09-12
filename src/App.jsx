@@ -18,6 +18,7 @@ const ADMIN_LIST_KEY = "ponto-admins";
 const OVERTIME_CODE_KEY = "ponto-overtime-code";
 const OVERTIME_CODE_VALID_MIN = 30; // minutos de validade do código gerado
 const STORE_COORDS_KEY = "ponto-store-coords";
+const HOLIDAYS_KEY = "ponto-holidays";
 const DEFAULT_ADMIN_PIN = "9999";
 
 const LEAVE_TYPES = [
@@ -239,19 +240,22 @@ function formatScheduleSummary(schedule) {
 // Calcula o fechamento mensal (horas, atrasos, faltas e ausências) por funcionário
 // Soma quantos minutos de trabalho são esperados de um funcionário entre duas datas,
 // com base no horário cadastrado dele (descontando o intervalo de almoço, se houver)
-function computeExpectedMinutes(schedule, startISO, endISO) {
+function computeExpectedMinutes(schedule, startISO, endISO, holidaySet) {
   const norm = normalizeSchedule(schedule);
   if (!norm) return 0;
   let total = 0;
   const d = new Date(startISO + "T00:00:00");
   const end = new Date(endISO + "T00:00:00");
   while (d <= end) {
-    const info = norm.perDay[d.getDay()];
-    if (info) {
-      const entrada = timeToMinutes(info.entrada), saida = timeToMinutes(info.saida);
-      if (entrada != null && saida != null) {
-        const lunch = info.lunch ? (info.lunchMin ?? 30) : 0;
-        total += Math.max(saida - entrada - lunch, 0);
+    const dateKey = fmtDateKey(d);
+    if (!holidaySet || !holidaySet.has(dateKey)) {
+      const info = norm.perDay[d.getDay()];
+      if (info) {
+        const entrada = timeToMinutes(info.entrada), saida = timeToMinutes(info.saida);
+        if (entrada != null && saida != null) {
+          const lunch = info.lunch ? (info.lunchMin ?? 30) : 0;
+          total += Math.max(saida - entrada - lunch, 0);
+        }
       }
     }
     d.setDate(d.getDate() + 1);
@@ -261,7 +265,8 @@ function computeExpectedMinutes(schedule, startISO, endISO) {
 
 // Calcula o fechamento (horas, atrasos, faltas e ausências) por funcionário, num período
 // livre (startISO a endISO, ambos "AAAA-MM-DD")
-function computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO) {
+function computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO, holidays) {
+  const holidaySet = new Set((holidays || []).map(h => h.date));
   const empList = employees.filter(e => storeFilter === "all" || e.store === storeFilter);
 
   return empList.map(emp => {
@@ -341,7 +346,7 @@ function computePeriodSummary(punches, leaves, employees, storeFilter, startISO,
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    const expectedMin = computeExpectedMinutes(emp.schedule, startISO, endISO);
+    const expectedMin = computeExpectedMinutes(emp.schedule, startISO, endISO, holidaySet);
 
     return { emp, totalMin, expectedMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails, punchDetails };
   });
@@ -503,6 +508,7 @@ export default function App() {
   const [punches, setPunches] = useState(null);
   const [requests, setRequests] = useState(null);
   const [leaves, setLeaves] = useState(null);
+  const [holidays, setHolidays] = useState([]);
   const [adminList, setAdminList] = useState(null);
   const [currentAdmin, setCurrentAdmin] = useState(null);
   const [overtimeCode, setOvertimeCode] = useState(null);
@@ -520,7 +526,7 @@ export default function App() {
 
   const loadAll = useCallback(async () => {
     setLoading(true); setLoadError(false);
-    const [empRaw, punRaw, reqRaw, leaRaw, adminsRaw, legacyPin, coordsRaw, otCode] = await Promise.all([
+    const [empRaw, punRaw, reqRaw, leaRaw, adminsRaw, legacyPin, coordsRaw, otCode, holidaysRaw] = await Promise.all([
       loadJSONRaw(EMP_KEY),
       loadJSONRaw(PUNCH_KEY),
       loadJSONRaw(REQUEST_KEY),
@@ -529,11 +535,12 @@ export default function App() {
       loadJSON(ADMIN_PIN_KEY, null),
       loadJSONRaw(STORE_COORDS_KEY),
       loadJSON(OVERTIME_CODE_KEY, null),
+      loadJSONRaw(HOLIDAYS_KEY),
     ]);
     // Se qualquer uma dessas consultas essenciais falhar (instabilidade de rede), não seguimos
     // com dados vazios — isso poderia levar a uma gravação que apaga informação real por cima.
     // Em vez disso, mostramos uma tela pedindo pra tentar de novo.
-    if (!empRaw.ok || !punRaw.ok || !reqRaw.ok || !leaRaw.ok || !adminsRaw.ok || !coordsRaw.ok) {
+    if (!empRaw.ok || !punRaw.ok || !reqRaw.ok || !leaRaw.ok || !adminsRaw.ok || !coordsRaw.ok || !holidaysRaw.ok) {
       setLoadError(true);
       setLoading(false);
       return;
@@ -543,6 +550,7 @@ export default function App() {
     setRequests(reqRaw.value || []);
     setLeaves(leaRaw.value || []);
     setStoreCoords(coordsRaw.value || {});
+    setHolidays(holidaysRaw.value || []);
     setOvertimeCode(otCode || null);
     // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
     // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
@@ -589,6 +597,8 @@ export default function App() {
   const fetchLatestAdminList = useCallback(async () => safeFetchLatest(ADMIN_LIST_KEY, []), [safeFetchLatest]);
   const persistStoreCoords = useCallback(async (next) => { await saveJSON(STORE_COORDS_KEY, next); setStoreCoords(next); }, []);
   const fetchLatestStoreCoords = useCallback(async () => safeFetchLatest(STORE_COORDS_KEY, {}), [safeFetchLatest]);
+  const persistHolidays = useCallback(async (next) => { await saveJSON(HOLIDAYS_KEY, next); setHolidays(next); }, []);
+  const fetchLatestHolidays = useCallback(async () => safeFetchLatest(HOLIDAYS_KEY, []), [safeFetchLatest]);
   const persistOvertimeCode = useCallback(async (next) => { await saveJSON(OVERTIME_CODE_KEY, next); setOvertimeCode(next); }, []);
   const fetchLatestOvertimeCode = useCallback(async () => await loadJSON(OVERTIME_CODE_KEY, null), []);
 
@@ -634,7 +644,7 @@ export default function App() {
         )}
         {view === "mypunches" && (
           <MyPunchesScreen
-            employees={employees} punches={punches} requests={requests} leaves={leaves} store={store}
+            employees={employees} punches={punches} requests={requests} leaves={leaves} holidays={holidays} store={store}
             onExit={() => setView("punch")}
           />
         )}
@@ -647,6 +657,7 @@ export default function App() {
             punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches}
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
+            holidays={holidays} persistHolidays={persistHolidays} fetchLatestHolidays={fetchLatestHolidays}
             adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin}
             storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords}
             overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode}
@@ -1314,7 +1325,7 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 const fieldLabel = { fontSize: 12, color: COLORS.textDim, marginBottom: 6 };
 
 // ---------- Meus Pontos (visão do próprio funcionário) ----------
-function MyPunchesScreen({ employees, punches, requests, leaves, store, onExit }) {
+function MyPunchesScreen({ employees, punches, requests, leaves, holidays, store, onExit }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
   const [emp, setEmp] = useState(null);
@@ -1334,7 +1345,7 @@ function MyPunchesScreen({ employees, punches, requests, leaves, store, onExit }
   const handleClear = () => { setPin(""); setError(false); };
 
   if (emp) {
-    return <MyPunchesDetail emp={emp} punches={punches} requests={requests} leaves={leaves} onExit={() => setEmp(null)} onFullExit={onExit} />;
+    return <MyPunchesDetail emp={emp} punches={punches} requests={requests} leaves={leaves} holidays={holidays} onExit={() => setEmp(null)} onFullExit={onExit} />;
   }
 
   return (
@@ -1367,7 +1378,7 @@ function MyPunchesScreen({ employees, punches, requests, leaves, store, onExit }
 
 const INACTIVITY_MS = 90000; // fecha sozinho depois de 90s sem uso (protege dispositivo compartilhado)
 
-function MyPunchesDetail({ emp, punches, requests, leaves, onExit, onFullExit }) {
+function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onFullExit }) {
   const [tab, setTab] = useState("pontos");
   const [periodType, setPeriodType] = useState("week"); // week | month | custom
   const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
@@ -1394,8 +1405,8 @@ function MyPunchesDetail({ emp, punches, requests, leaves, onExit, onFullExit })
   }, [periodType, customStart, customEnd]);
 
   const summary = useMemo(
-    () => computePeriodSummary(punches, leaves, [emp], "all", startISO, endISO)[0],
-    [punches, leaves, emp, startISO, endISO]
+    () => computePeriodSummary(punches, leaves, [emp], "all", startISO, endISO, holidays)[0],
+    [punches, leaves, emp, startISO, endISO, holidays]
   );
   const mainPunches = useMemo(() => summary.punchDetails.filter(d => d.statusLabel !== "Intervalo"), [summary]);
   const myRequests = useMemo(
@@ -1542,7 +1553,7 @@ function AdminLogin({ adminList, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, holidays, persistHolidays, fetchLatestHolidays, adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
   const [tab, setTab] = useState("records");
   const restrictedStore = currentAdmin && currentAdmin.role !== "master" ? currentAdmin.store : null;
 
@@ -1575,10 +1586,10 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} currentAdmin={currentAdmin} restrictedStore={restrictedStore} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} restrictedStore={restrictedStore} />}
-      {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} restrictedStore={restrictedStore} />}
+      {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} holidays={holidays} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} restrictedStore={restrictedStore} />}
-      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} employees={employees} punches={punches} requests={requests} leaves={leaves} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} employees={employees} punches={punches} requests={requests} leaves={leaves} holidays={holidays} persistHolidays={persistHolidays} fetchLatestHolidays={fetchLatestHolidays} />}
     </div>
   );
 }
@@ -2315,7 +2326,7 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
 }
 
 // ---- Fechamento mensal (para contabilidade) ----
-function ClosingTab({ employees, punches, leaves, restrictedStore }) {
+function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
   const [periodType, setPeriodType] = useState("month"); // month | custom
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
   const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
@@ -2328,7 +2339,12 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
     if (periodType === "month") {
       const [y, m] = month.split("-").map(Number);
       const lastDay = new Date(y, m, 0).getDate();
-      return { startISO: `${month}-01`, endISO: `${month}-${pad2(lastDay)}` };
+      const naturalEnd = `${month}-${pad2(lastDay)}`;
+      const today = fmtDateKey(new Date());
+      // Se o mês escolhido ainda está em curso, não conta como "previsto" os dias que
+      // ainda não aconteceram — senão o saldo fica artificialmente muito negativo.
+      const endISO = naturalEnd > today ? today : naturalEnd;
+      return { startISO: `${month}-01`, endISO };
     }
     return { startISO: customStart, endISO: customEnd };
   }, [periodType, month, customStart, customEnd]);
@@ -2339,7 +2355,7 @@ function ClosingTab({ employees, punches, leaves, restrictedStore }) {
     [punches, startISO, endISO]
   );
 
-  const summary = useMemo(() => computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO), [punches, leaves, employees, storeFilter, startISO, endISO]);
+  const summary = useMemo(() => computePeriodSummary(punches, leaves, employees, storeFilter, startISO, endISO, holidays), [punches, leaves, employees, storeFilter, startISO, endISO, holidays]);
 
   const periodLabel = useMemo(() => {
     if (periodType === "month") {
@@ -2796,7 +2812,7 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode, employees, punches, requests, leaves }) {
+function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode, employees, punches, requests, leaves, holidays, persistHolidays, fetchLatestHolidays }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
   const [showAddAdmin, setShowAddAdmin] = useState(false);
@@ -2988,6 +3004,8 @@ function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, curren
 
       {isMaster && <BackupSection employees={employees} punches={punches} requests={requests} leaves={leaves} />}
 
+      {isMaster && <HolidaysSection holidays={holidays} persistHolidays={persistHolidays} fetchLatestHolidays={fetchLatestHolidays} />}
+
       <div style={{ color: COLORS.textDim, fontSize: 12, maxWidth: 420 }}>
         Os dados (funcionários, registros, solicitações e fotos) ficam salvos automaticamente e são compartilhados entre todos os dispositivos que abrirem este app.
       </div>
@@ -3040,6 +3058,60 @@ function BackupSection({ employees, punches, requests, leaves }) {
             <button onClick={() => downloadBackup(b.key)} style={{ background: "none", border: "none", color: COLORS.amber, textDecoration: "underline", padding: 0, fontSize: 12 }}>
               Baixar
             </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HolidaysSection({ holidays, persistHolidays, fetchLatestHolidays }) {
+  const [date, setDate] = useState("");
+  const [label, setLabel] = useState("");
+  const [err, setErr] = useState("");
+
+  const sorted = useMemo(() => [...holidays].sort((a, b) => a.date.localeCompare(b.date)), [holidays]);
+
+  const add = async () => {
+    if (!date) { setErr("Escolha uma data."); return; }
+    try {
+      const latest = await fetchLatestHolidays();
+      if (latest.some(h => h.date === date)) { setErr("Essa data já está cadastrada."); return; }
+      await persistHolidays([...latest, { date, label: label.trim() || "Feriado" }]);
+      setDate(""); setLabel(""); setErr("");
+    } catch (e) {
+      setErr("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    }
+  };
+
+  const remove = async (d) => {
+    try {
+      const latest = await fetchLatestHolidays();
+      await persistHolidays(latest.filter(h => h.date !== d));
+    } catch (e) {
+      window.alert("Não foi possível excluir agora (falha de conexão). Tente novamente.");
+    }
+  };
+
+  return (
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 420 }}>
+      <div style={{ fontSize: 13, color: COLORS.textDim }}>Feriados</div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        Datas cadastradas aqui não entram na conta de "Previstas" no Fechamento nem na tela de "Meus pontos" — mesmo que o funcionário tenha horário nesse dia da semana.
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} style={selectStyle} />
+        <input placeholder="Nome (opcional)" value={label} onChange={e => setLabel(e.target.value)} style={{ ...selectStyle, flex: 1, minWidth: 120 }} />
+        <button onClick={add} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim }}><Plus size={13} /> Adicionar</button>
+      </div>
+      {err && <div style={{ color: COLORS.red, fontSize: 12 }}>{err}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 200, overflowY: "auto" }}>
+        {sorted.length === 0 ? (
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum feriado cadastrado.</div>
+        ) : sorted.map(h => (
+          <div key={h.date} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
+            <span>{fmtDate(new Date(h.date + "T00:00:00"))} — {h.label}</span>
+            <button onClick={() => remove(h.date)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={13} /></button>
           </div>
         ))}
       </div>
