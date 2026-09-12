@@ -240,7 +240,7 @@ function formatScheduleSummary(schedule) {
 // Calcula o fechamento mensal (horas, atrasos, faltas e ausências) por funcionário
 // Soma quantos minutos de trabalho são esperados de um funcionário entre duas datas,
 // com base no horário cadastrado dele (descontando o intervalo de almoço, se houver)
-function computeExpectedMinutes(schedule, startISO, endISO, holidaySet) {
+function computeExpectedMinutes(schedule, startISO, endISO, holidaySet, empLeaves) {
   const norm = normalizeSchedule(schedule);
   if (!norm) return 0;
   let total = 0;
@@ -249,12 +249,29 @@ function computeExpectedMinutes(schedule, startISO, endISO, holidaySet) {
   while (d <= end) {
     const dateKey = fmtDateKey(d);
     if (!holidaySet || !holidaySet.has(dateKey)) {
-      const info = norm.perDay[d.getDay()];
-      if (info) {
-        const entrada = timeToMinutes(info.entrada), saida = timeToMinutes(info.saida);
-        if (entrada != null && saida != null) {
-          const lunch = info.lunch ? (info.lunchMin ?? 30) : 0;
-          total += Math.max(saida - entrada - lunch, 0);
+      // Ausência de dia inteiro cobrindo essa data (férias, atestado, licença etc.) —
+      // esse dia não conta como previsto. Uma ausência com horário parcial (mesmo dia
+      // de início e fim, com hora marcada) não entra aqui — é tratada abaixo, descontando
+      // só o período abonado.
+      const fullDayLeave = (empLeaves || []).some(l =>
+        l.startDate <= dateKey && l.endDate >= dateKey && !(l.startDate === l.endDate && l.partialStart && l.partialEnd)
+      );
+      if (!fullDayLeave) {
+        const info = norm.perDay[d.getDay()];
+        if (info) {
+          const entrada = timeToMinutes(info.entrada), saida = timeToMinutes(info.saida);
+          if (entrada != null && saida != null) {
+            const lunch = info.lunch ? (info.lunchMin ?? 30) : 0;
+            let dayMin = Math.max(saida - entrada - lunch, 0);
+            // Ausência parcial nesse dia específico (ex.: atestado das 8:30 às 12:21) —
+            // desconta só o período abonado, não o dia inteiro.
+            const partialLeave = (empLeaves || []).find(l => l.startDate === dateKey && l.endDate === dateKey && l.partialStart && l.partialEnd);
+            if (partialLeave) {
+              const pStart = timeToMinutes(partialLeave.partialStart), pEnd = timeToMinutes(partialLeave.partialEnd);
+              if (pStart != null && pEnd != null) dayMin = Math.max(dayMin - Math.max(pEnd - pStart, 0), 0);
+            }
+            total += dayMin;
+          }
         }
       }
     }
@@ -337,8 +354,9 @@ function computePeriodSummary(punches, leaves, employees, storeFilter, startISO,
     }
     const avgIntervalMin = intervalCount ? Math.round(intervalSum / intervalCount) : null;
 
+    const empLeaves = leaves.filter(l => l.employeeId === emp.id);
     const leaveDaysByType = {};
-    leaves.filter(l => l.employeeId === emp.id).forEach(l => {
+    empLeaves.forEach(l => {
       if (l.endDate < startISO || l.startDate > endISO) return;
       const start = l.startDate < startISO ? startISO : l.startDate;
       const end = l.endDate > endISO ? endISO : l.endDate;
@@ -346,7 +364,7 @@ function computePeriodSummary(punches, leaves, employees, storeFilter, startISO,
       leaveDaysByType[l.type] = (leaveDaysByType[l.type] || 0) + days;
     });
 
-    const expectedMin = computeExpectedMinutes(emp.schedule, startISO, endISO, holidaySet);
+    const expectedMin = computeExpectedMinutes(emp.schedule, startISO, endISO, holidaySet, empLeaves);
 
     return { emp, totalMin, expectedMin, daysWorked: daysWorked.size, lateCount, earlyLeaveCount, leaveDaysByType, longIntervals, shortIntervals, avgIntervalMin, intervalCount, intervalDetails, punchDetails };
   });
@@ -1201,6 +1219,9 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
   const [pinError, setPinError] = useState("");
   const [type, setType] = useState(REQUEST_TYPES[0].id);
   const [date, setDate] = useState(fmtDateKey(new Date()));
+  const [partial, setPartial] = useState(false);
+  const [partialStart, setPartialStart] = useState("");
+  const [partialEnd, setPartialEnd] = useState("");
   const [note, setNote] = useState("");
   const [photo, setPhoto] = useState(null);
   const [photoName, setPhotoName] = useState("");
@@ -1224,11 +1245,14 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 
   const submit = async () => {
     if (!empFound || !note.trim()) return;
+    const isPartial = type === "atestado" && partial;
+    if (isPartial && (!partialStart || !partialEnd || partialEnd <= partialStart)) return;
     setSending(true);
     const record = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       employeeId: empFound.id, employeeName: empFound.name, store,
       type, date, note: note.trim(), photo: photo || null,
+      ...(isPartial ? { partialStart, partialEnd } : {}),
       status: "pendente", createdAt: new Date().toISOString(), adminNote: "",
     };
     try {
@@ -1284,6 +1308,22 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
         <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
       </div>
 
+      {type === "atestado" && (
+        <div>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: COLORS.textDim }}>
+            <input type="checkbox" checked={partial} onChange={e => setPartial(e.target.checked)} />
+            Foi abonada só uma parte do dia (ex.: consulta médica de manhã)
+          </label>
+          {partial && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 8 }}>
+              <input type="time" value={partialStart} onChange={e => setPartialStart(e.target.value)} style={{ ...selectStyle, flex: 1 }} />
+              <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+              <input type="time" value={partialEnd} onChange={e => setPartialEnd(e.target.value)} style={{ ...selectStyle, flex: 1 }} />
+            </div>
+          )}
+        </div>
+      )}
+
       <div>
         <div style={fieldLabel}>Descrição</div>
         <textarea
@@ -1310,7 +1350,7 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
       </div>
 
       <button
-        onClick={submit} disabled={!note.trim() || sending}
+        onClick={submit} disabled={!note.trim() || sending || (type === "atestado" && partial && (!partialStart || !partialEnd || partialEnd <= partialStart))}
         style={{
           ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber,
           opacity: !note.trim() || sending ? 0.6 : 1, marginTop: 4,
@@ -1584,7 +1624,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
       </div>
       {tab === "records" && <RecordsTab employees={employees} punches={punches} persistPunches={persistPunches} leaves={leaves} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
-      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} currentAdmin={currentAdmin} restrictedStore={restrictedStore} />}
+      {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} leaves={leaves} persistLeaves={persistLeaves} currentAdmin={currentAdmin} restrictedStore={restrictedStore} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} restrictedStore={restrictedStore} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} holidays={holidays} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
@@ -1844,7 +1884,7 @@ function DaySummary({ punches, filterStore, filterDate }) {
 }
 
 // ---- Requests tab ----
-function RequestsTab({ requests, persistRequests, punches, persistPunches, fetchLatestPunches, currentAdmin, restrictedStore }) {
+function RequestsTab({ requests, persistRequests, punches, persistPunches, fetchLatestPunches, leaves, persistLeaves, currentAdmin, restrictedStore }) {
   const [filter, setFilter] = useState("pendente");
   const [expanded, setExpanded] = useState(null);
   const [adjustingId, setAdjustingId] = useState(null);
@@ -1865,6 +1905,25 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
       await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote: adminNote + byWhom, resolvedAt: new Date().toISOString() } : r));
     } catch (e) {
       window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    }
+  };
+
+  // Aprovar um atestado médico já cria a ausência correspondente (dia inteiro, ou só o
+  // período informado, se a funcionária marcou que foi parcial) — sem precisar de um
+  // segundo passo manual em Ausências.
+  const approveAtestado = async (r) => {
+    try {
+      const latestLeaves = await loadJSON(LEAVE_KEY, leaves);
+      await persistLeaves([...latestLeaves, {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
+        type: "atestado", startDate: r.date, endDate: r.date, note: r.note,
+        ...(r.partialStart && r.partialEnd ? { partialStart: r.partialStart, partialEnd: r.partialEnd } : {}),
+        photo: r.photo || null, createdAt: new Date().toISOString(),
+      }]);
+      await setStatus(r.id, "aprovada", `Atestado aprovado e ausência registrada (${r.partialStart && r.partialEnd ? `${r.partialStart}–${r.partialEnd}` : "dia inteiro"}).`);
+    } catch (e) {
+      window.alert("Não foi possível aprovar agora (falha de conexão). Tente novamente.");
     }
   };
 
@@ -1957,6 +2016,10 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
                   <button onClick={() => openAdjust(r)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, padding: "6px 10px", fontSize: 12 }}>
                     <Clock size={13} /> Ajustar ponto e aprovar
                   </button>
+                ) : r.type === "atestado" ? (
+                  <button onClick={() => approveAtestado(r)} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
+                    <CheckCircle2 size={13} /> Aprovar (registra ausência)
+                  </button>
                 ) : (
                   <button onClick={() => setStatus(r.id, "aprovada")} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
                     <CheckCircle2 size={13} /> Aprovar
@@ -2028,6 +2091,9 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
   const [type, setType] = useState(LEAVE_TYPES[0].id);
   const [startDate, setStartDate] = useState(fmtDateKey(new Date()));
   const [endDate, setEndDate] = useState(fmtDateKey(new Date()));
+  const [partial, setPartial] = useState(false);
+  const [partialStart, setPartialStart] = useState("");
+  const [partialEnd, setPartialEnd] = useState("");
   const [note, setNote] = useState("");
   const [photo, setPhoto] = useState(null);
   const [err, setErr] = useState("");
@@ -2043,15 +2109,19 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
   const add = async () => {
     if (!employeeId) { setErr("Selecione o funcionário."); return; }
     if (!startDate || !endDate || endDate < startDate) { setErr("Verifique as datas."); return; }
+    const isPartial = partial && startDate === endDate;
+    if (isPartial && (!partialStart || !partialEnd || partialEnd <= partialStart)) { setErr("Verifique o horário do período abonado."); return; }
     const emp = employees.find(e => e.id === employeeId);
     try {
       const latest = await loadJSON(LEAVE_KEY, leaves);
       await persistLeaves([...latest, {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         employeeId, employeeName: emp?.name || "", store: emp?.store, type, startDate, endDate, note: note.trim(),
+        ...(isPartial ? { partialStart, partialEnd } : {}),
         photo: photo || null, createdAt: new Date().toISOString(),
       }]);
       setEmployeeId(""); setType(LEAVE_TYPES[0].id); setStartDate(fmtDateKey(new Date())); setEndDate(fmtDateKey(new Date()));
+      setPartial(false); setPartialStart(""); setPartialEnd("");
       setNote(""); setPhoto(null); setErr(""); setShowForm(false);
     } catch (e) {
       setErr("Não foi possível salvar agora (falha de conexão). Tente novamente.");
@@ -2106,6 +2176,19 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
               <input type="date" value={endDate} onChange={e => setEndDate(e.target.value)} style={{ ...selectStyle, width: "100%" }} />
             </div>
           </div>
+          {startDate === endDate && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: COLORS.textDim }}>
+              <input type="checkbox" checked={partial} onChange={e => setPartial(e.target.checked)} />
+              Só uma parte do dia foi abonada (ex.: consulta médica de manhã)
+            </label>
+          )}
+          {startDate === endDate && partial && (
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="time" value={partialStart} onChange={e => setPartialStart(e.target.value)} style={{ ...selectStyle, flex: 1 }} />
+              <span style={{ color: COLORS.textDim, fontSize: 12 }}>até</span>
+              <input type="time" value={partialEnd} onChange={e => setPartialEnd(e.target.value)} style={{ ...selectStyle, flex: 1 }} />
+            </div>
+          )}
           <textarea placeholder="Observação (opcional)" value={note} onChange={e => setNote(e.target.value)} rows={2} style={{ ...selectStyle, width: "100%", resize: "vertical", fontFamily: FONT_UI }} />
           <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
           {photo ? (
@@ -2141,6 +2224,7 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
                 </div>
                 <div style={{ color: COLORS.textDim, fontSize: 12, marginTop: 2 }}>
                   {fmtDate(new Date(l.startDate + "T00:00:00"))} — {fmtDate(new Date(l.endDate + "T00:00:00"))}
+                  {l.partialStart && l.partialEnd && ` · ${l.partialStart} às ${l.partialEnd}`}
                 </div>
                 {l.note && <div style={{ fontSize: 12, marginTop: 4 }}>{l.note}</div>}
               </div>
