@@ -86,6 +86,60 @@ async function saveJSON(key, value) {
   return true;
 }
 
+// ---------- Backup automático ----------
+// Todo dia, na primeira vez que o app abre, salva uma cópia completa dos dados (funcionários,
+// pontos, solicitações, ausências) num registro separado, datado. Mantém os últimos 30 dias.
+const BACKUP_PREFIX = "ponto-backup-";
+const MAX_BACKUPS = 30;
+
+async function listBackups() {
+  try {
+    const res = await fetch(
+      `${SUPABASE_URL}/rest/v1/ponto_kv?key=like.${encodeURIComponent(BACKUP_PREFIX)}*&select=key,updated_at&order=key.desc`,
+      { headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` } }
+    );
+    if (!res.ok) return [];
+    return await res.json();
+  } catch (e) {
+    return [];
+  }
+}
+
+async function deleteBackup(key) {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/ponto_kv?key=eq.${encodeURIComponent(key)}`, {
+      method: "DELETE",
+      headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}` },
+    });
+    return res.ok;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Cria (ou sobrescreve, se forceNew=true) o backup do dia de hoje com os dados atuais,
+// e apaga os backups mais antigos além do limite. Nunca lança erro — backup é best-effort
+// e não pode travar o carregamento normal do app.
+async function runBackup(snapshotData, forceNew = false) {
+  try {
+    const todayKey = fmtDateKey(new Date());
+    const backupKey = `${BACKUP_PREFIX}${todayKey}`;
+    if (!forceNew) {
+      const existing = await loadJSONRaw(backupKey);
+      if (existing.ok && existing.value) return { skipped: true };
+    }
+    await saveJSON(backupKey, { ...snapshotData, savedAt: new Date().toISOString() });
+    const backups = await listBackups();
+    if (backups.length > MAX_BACKUPS) {
+      const toRemove = backups.slice(MAX_BACKUPS);
+      for (const b of toRemove) await deleteBackup(b.key);
+    }
+    return { skipped: false };
+  } catch (e) {
+    return { error: e.message };
+  }
+}
+
 const STORES = [
   { id: "afrika", label: "Afrika Restaurante" },
   { id: "artex", label: "Artex" },
@@ -504,6 +558,8 @@ export default function App() {
       await saveJSON(ADMIN_LIST_KEY, initial);
     }
     setLoading(false);
+    // Backup diário automático (não trava nem atrasa o carregamento do app — roda em segundo plano)
+    runBackup({ employees: empRaw.value || [], punches: punRaw.value || [], requests: reqRaw.value || [], leaves: leaRaw.value || [] });
   }, []);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -1522,7 +1578,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} restrictedStore={restrictedStore} />}
-      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} />}
+      {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} employees={employees} punches={punches} requests={requests} leaves={leaves} />}
     </div>
   );
 }
@@ -2740,7 +2796,7 @@ function ScheduleEditor({ employee, onSave, onCancel }) {
 }
 
 // ---- Settings tab ----
-function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode }) {
+function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, restrictedStore, overtimeCode, persistOvertimeCode, employees, punches, requests, leaves }) {
   const [localCoords, setLocalCoords] = useState(storeCoords);
   const [locating, setLocating] = useState(null);
   const [showAddAdmin, setShowAddAdmin] = useState(false);
@@ -2930,8 +2986,62 @@ function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, curren
         <div style={{ color: COLORS.textDim, fontSize: 11 }}>Dica: abra este app no tablet da loja, fique no local e clique em "Usar localização atual".</div>
       </div>
 
+      {isMaster && <BackupSection employees={employees} punches={punches} requests={requests} leaves={leaves} />}
+
       <div style={{ color: COLORS.textDim, fontSize: 12, maxWidth: 420 }}>
         Os dados (funcionários, registros, solicitações e fotos) ficam salvos automaticamente e são compartilhados entre todos os dispositivos que abrirem este app.
+      </div>
+    </div>
+  );
+}
+
+function BackupSection({ employees, punches, requests, leaves }) {
+  const [backups, setBackups] = useState(null);
+  const [running, setRunning] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const refresh = async () => { setBackups(await listBackups()); };
+  useEffect(() => { refresh(); }, []);
+
+  const downloadBackup = async (key) => {
+    const data = await loadJSON(key, null);
+    if (!data) { window.alert("Não foi possível ler esse backup agora."); return; }
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `${key}.json`; a.click(); URL.revokeObjectURL(url);
+  };
+
+  const backupNow = async () => {
+    setRunning(true); setMsg("");
+    const result = await runBackup({ employees, punches, requests, leaves }, true);
+    setRunning(false);
+    if (result.error) setMsg("Não foi possível fazer o backup agora (falha de conexão).");
+    else { setMsg("Backup de hoje atualizado com sucesso."); await refresh(); }
+  };
+
+  return (
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10, maxWidth: 420 }}>
+      <div style={{ fontSize: 13, color: COLORS.textDim }}>Backup automático</div>
+      <div style={{ color: COLORS.textDim, fontSize: 11 }}>
+        Todo dia, na primeira vez que alguém abre o Admin, o sistema guarda uma cópia completa dos dados (funcionários, pontos, solicitações e ausências). Os últimos {MAX_BACKUPS} dias ficam disponíveis pra baixar aqui.
+      </div>
+      <button onClick={backupNow} disabled={running} style={{ ...ghostBtnStyle, alignSelf: "flex-start", fontSize: 12, padding: "6px 10px", opacity: running ? 0.6 : 1 }}>
+        {running ? "Fazendo backup…" : "Fazer backup agora"}
+      </button>
+      {msg && <div style={{ fontSize: 12, color: COLORS.teal }}>{msg}</div>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, maxHeight: 220, overflowY: "auto" }}>
+        {backups === null ? (
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>Carregando…</div>
+        ) : backups.length === 0 ? (
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>Nenhum backup ainda.</div>
+        ) : backups.map(b => (
+          <div key={b.key} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12 }}>
+            <span>{b.key.replace(BACKUP_PREFIX, "")}</span>
+            <button onClick={() => downloadBackup(b.key)} style={{ background: "none", border: "none", color: COLORS.amber, textDecoration: "underline", padding: 0, fontSize: 12 }}>
+              Baixar
+            </button>
+          </div>
+        ))}
       </div>
     </div>
   );
