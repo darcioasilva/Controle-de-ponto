@@ -59,9 +59,13 @@ async function loadJSONRaw(key) {
     return { ok: false };
   }
 }
+// Grava e SEMPRE confirma se realmente funcionou — nunca engole uma falha em silêncio.
+// Se o servidor recusar (ex.: pacote de dados grande demais) ou a rede cair, isso agora
+// lança um erro de verdade, em vez de devolver só um "false" que ninguém checava.
 async function saveJSON(key, value) {
+  let res;
   try {
-    const res = await fetch(`${SUPABASE_URL}/rest/v1/ponto_kv`, {
+    res = await fetch(`${SUPABASE_URL}/rest/v1/ponto_kv`, {
       method: "POST",
       headers: {
         apikey: SUPABASE_KEY,
@@ -71,10 +75,15 @@ async function saveJSON(key, value) {
       },
       body: JSON.stringify({ key, value, updated_at: new Date().toISOString() }),
     });
-    return res.ok;
   } catch (e) {
-    return false;
+    throw new Error(`Falha de rede ao salvar "${key}": ${e.message}`);
   }
+  if (!res.ok) {
+    let detail = "";
+    try { detail = await res.text(); } catch (e2) { /* ignore */ }
+    throw new Error(`O servidor recusou salvar "${key}" (HTTP ${res.status}). ${detail.slice(0, 200)}`);
+  }
+  return true;
 }
 
 const STORES = [
@@ -453,59 +462,98 @@ export default function App() {
     return () => clearInterval(t);
   }, []);
 
-  useEffect(() => {
-    (async () => {
-      const [emp, pun, req, lea, adminsRaw, legacyPin, coords, otCode] = await Promise.all([
-        loadJSON(EMP_KEY, []),
-        loadJSON(PUNCH_KEY, []),
-        loadJSON(REQUEST_KEY, []),
-        loadJSON(LEAVE_KEY, []),
-        loadJSONRaw(ADMIN_LIST_KEY),
-        loadJSON(ADMIN_PIN_KEY, null),
-        loadJSON(STORE_COORDS_KEY, {}),
-        loadJSON(OVERTIME_CODE_KEY, null),
-      ]);
-      setEmployees(emp); setPunches(pun); setRequests(req); setLeaves(lea);
-      setStoreCoords(coords || {});
-      setOvertimeCode(otCode || null);
-      // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
-      // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
-      // Importante: só criamos (e gravamos) uma lista nova quando a consulta teve sucesso e realmente
-      // veio vazia — nunca quando a consulta falhou (rede/servidor), pra não confundir uma falha
-      // temporária com "não existe nada ainda" e apagar os administradores reais por cima.
-      if (adminsRaw.ok && adminsRaw.value && adminsRaw.value.length > 0) {
-        const admins = adminsRaw.value;
-        const fixed = admins.map(a => a.id === "admin-1" ? { ...a, role: "master", name: a.name === "Admin" ? "Master" : a.name } : { ...a, role: a.role || "admin" });
-        setAdminList(fixed);
-        if (JSON.stringify(fixed) !== JSON.stringify(admins)) await saveJSON(ADMIN_LIST_KEY, fixed);
-      } else if (adminsRaw.ok) {
-        // Consulta funcionou e realmente não há nenhuma lista salva ainda — primeira vez de verdade.
-        const initial = [{ id: "admin-1", name: "Master", pin: legacyPin || DEFAULT_ADMIN_PIN, role: "master" }];
-        setAdminList(initial);
-        await saveJSON(ADMIN_LIST_KEY, initial);
-      } else {
-        // A consulta falhou — não sabemos se existe lista ou não. Não grava nada; só usa
-        // uma lista vazia temporariamente nesta sessão até conseguir ler de novo.
-        setAdminList([]);
-      }
+  const [loadError, setLoadError] = useState(false);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true); setLoadError(false);
+    const [empRaw, punRaw, reqRaw, leaRaw, adminsRaw, legacyPin, coordsRaw, otCode] = await Promise.all([
+      loadJSONRaw(EMP_KEY),
+      loadJSONRaw(PUNCH_KEY),
+      loadJSONRaw(REQUEST_KEY),
+      loadJSONRaw(LEAVE_KEY),
+      loadJSONRaw(ADMIN_LIST_KEY),
+      loadJSON(ADMIN_PIN_KEY, null),
+      loadJSONRaw(STORE_COORDS_KEY),
+      loadJSON(OVERTIME_CODE_KEY, null),
+    ]);
+    // Se qualquer uma dessas consultas essenciais falhar (instabilidade de rede), não seguimos
+    // com dados vazios — isso poderia levar a uma gravação que apaga informação real por cima.
+    // Em vez disso, mostramos uma tela pedindo pra tentar de novo.
+    if (!empRaw.ok || !punRaw.ok || !reqRaw.ok || !leaRaw.ok || !adminsRaw.ok || !coordsRaw.ok) {
+      setLoadError(true);
       setLoading(false);
-    })();
+      return;
+    }
+    setEmployees(empRaw.value || []);
+    setPunches(punRaw.value || []);
+    setRequests(reqRaw.value || []);
+    setLeaves(leaRaw.value || []);
+    setStoreCoords(coordsRaw.value || {});
+    setOvertimeCode(otCode || null);
+    // Migração: se ainda não existe lista de admins, cria uma a partir do PIN antigo (ou padrão).
+    // O primeiro administrador (o que já existia) vira o "Master" — só ele pode gerenciar outros admins.
+    if (adminsRaw.value && adminsRaw.value.length > 0) {
+      const admins = adminsRaw.value;
+      const fixed = admins.map(a => a.id === "admin-1" ? { ...a, role: "master", name: a.name === "Admin" ? "Master" : a.name } : { ...a, role: a.role || "admin" });
+      setAdminList(fixed);
+      if (JSON.stringify(fixed) !== JSON.stringify(admins)) await saveJSON(ADMIN_LIST_KEY, fixed);
+    } else {
+      // Consulta funcionou e realmente não há nenhuma lista salva ainda — primeira vez de verdade.
+      const initial = [{ id: "admin-1", name: "Master", pin: legacyPin || DEFAULT_ADMIN_PIN, role: "master" }];
+      setAdminList(initial);
+      await saveJSON(ADMIN_LIST_KEY, initial);
+    }
+    setLoading(false);
   }, []);
 
-  const persistEmployees = useCallback(async (next) => { setEmployees(next); await saveJSON(EMP_KEY, next); }, []);
-  const persistPunches = useCallback(async (next) => { setPunches(next); await saveJSON(PUNCH_KEY, next); }, []);
-  const fetchLatestPunches = useCallback(async () => await loadJSON(PUNCH_KEY, []), []);
-  const persistRequests = useCallback(async (next) => { setRequests(next); await saveJSON(REQUEST_KEY, next); }, []);
-  const persistLeaves = useCallback(async (next) => { setLeaves(next); await saveJSON(LEAVE_KEY, next); }, []);
-  const persistAdminList = useCallback(async (next) => { setAdminList(next); await saveJSON(ADMIN_LIST_KEY, next); }, []);
-  const fetchLatestAdminList = useCallback(async () => await loadJSON(ADMIN_LIST_KEY, []), []);
-  const persistStoreCoords = useCallback(async (next) => { setStoreCoords(next); await saveJSON(STORE_COORDS_KEY, next); }, []);
-  const fetchLatestStoreCoords = useCallback(async () => await loadJSON(STORE_COORDS_KEY, {}), []);
-  const persistOvertimeCode = useCallback(async (next) => { setOvertimeCode(next); await saveJSON(OVERTIME_CODE_KEY, next); }, []);
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  // Busca a versão mais recente com segurança: nunca devolve "vazio" quando a consulta falhou,
+  // pra nenhuma tela poder confundir uma falha de rede com "não existe nada" e sobrescrever
+  // dados reais numa gravação seguinte.
+  const safeFetchLatest = useCallback(async (key, fallback) => {
+    const raw = await loadJSONRaw(key);
+    if (raw.ok) return raw.value ?? fallback;
+    throw new Error("Não foi possível confirmar os dados salvos (falha de rede). Tente novamente.");
+  }, []);
+
+  // Toda função de gravação segue o mesmo princípio: primeiro tenta salvar no banco de
+  // verdade; só atualiza o que aparece na tela DEPOIS de confirmar sucesso. Se falhar,
+  // o erro sobe pra quem chamou (que já trata isso com try/catch e avisa o usuário) —
+  // a tela nunca mais mostra "salvou" sem ter salvo de verdade.
+  const persistEmployees = useCallback(async (next) => { await saveJSON(EMP_KEY, next); setEmployees(next); }, []);
+  const persistPunches = useCallback(async (next) => { await saveJSON(PUNCH_KEY, next); setPunches(next); }, []);
+  // Busca os pontos mais recentes com segurança: se a consulta falhar (rede instável),
+  // avisa em vez de devolver uma lista vazia — evita que uma falha passageira seja
+  // confundida com "não há pontos" e apague o histórico inteiro numa gravação seguinte.
+  const fetchLatestPunches = useCallback(async () => safeFetchLatest(PUNCH_KEY, []), [safeFetchLatest]);
+  const persistRequests = useCallback(async (next) => { await saveJSON(REQUEST_KEY, next); setRequests(next); }, []);
+  const persistLeaves = useCallback(async (next) => { await saveJSON(LEAVE_KEY, next); setLeaves(next); }, []);
+  const persistAdminList = useCallback(async (next) => { await saveJSON(ADMIN_LIST_KEY, next); setAdminList(next); }, []);
+  const fetchLatestAdminList = useCallback(async () => safeFetchLatest(ADMIN_LIST_KEY, []), [safeFetchLatest]);
+  const persistStoreCoords = useCallback(async (next) => { await saveJSON(STORE_COORDS_KEY, next); setStoreCoords(next); }, []);
+  const fetchLatestStoreCoords = useCallback(async () => safeFetchLatest(STORE_COORDS_KEY, {}), [safeFetchLatest]);
+  const persistOvertimeCode = useCallback(async (next) => { await saveJSON(OVERTIME_CODE_KEY, next); setOvertimeCode(next); }, []);
   const fetchLatestOvertimeCode = useCallback(async () => await loadJSON(OVERTIME_CODE_KEY, null), []);
 
   if (loading) {
     return <div style={styles.appShell}><div style={{ color: COLORS.textDim, fontFamily: FONT_UI, padding: 24 }}>Carregando…</div></div>;
+  }
+  if (loadError) {
+    return (
+      <div style={styles.appShell}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 16, padding: 24, textAlign: "center" }}>
+          <div style={{ fontFamily: FONT_DISPLAY, fontSize: 18, fontWeight: 700, color: COLORS.text }}>Não foi possível carregar os dados</div>
+          <div style={{ color: COLORS.textDim, fontSize: 14, maxWidth: 360 }}>
+            Isso pode ser uma instabilidade passageira de conexão. Por segurança, o app não abre com dados incompletos.
+          </div>
+          <button onClick={loadAll} style={{
+            background: COLORS.amber, color: "#1A1400", border: "none", borderRadius: 8,
+            padding: "10px 18px", fontSize: 14, fontWeight: 700, cursor: "pointer",
+          }}>Tentar novamente</button>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -679,11 +727,17 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
     };
     // Busca a versão mais recente salva no banco antes de gravar, pra não perder pontos
     // batidos em outro aparelho enquanto este ficou aberto sem atualizar.
-    const latest = await fetchLatestPunches();
-    await persistPunches([...latest, record]);
-    setFeedback({ name: emp.name, action: nextAction, time: new Date(), photo, hasLocation: !!loc, outOfRange });
-    setPin("");
-    setTimeout(() => setFeedback(null), 3200);
+    try {
+      const latest = await fetchLatestPunches();
+      await persistPunches([...latest, record]);
+      setFeedback({ name: emp.name, action: nextAction, time: new Date(), photo, hasLocation: !!loc, outOfRange });
+      setPin("");
+      setTimeout(() => setFeedback(null), 3200);
+    } catch (e) {
+      setCapturing(false);
+      setError("Não foi possível registrar o ponto agora (falha de conexão). Tente novamente.");
+      setPin("");
+    }
   };
 
   const retryAfterBlock = () => {
@@ -694,14 +748,19 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
   const cancelBlock = () => { setBlockState(null); setPin(""); };
 
   const proceedAfterConfirm = async (emp, nextAction) => {
-    const latest = await fetchLatestPunches();
-    const dayIdx = countTodayPunches(latest, emp.id);
-    const issue = checkTimingIssue(emp, nextAction, dayIdx);
-    if (issue) {
-      setConfirmState({ emp, nextAction, ...issue });
-      return;
+    try {
+      const latest = await fetchLatestPunches();
+      const dayIdx = countTodayPunches(latest, emp.id);
+      const issue = checkTimingIssue(emp, nextAction, dayIdx);
+      if (issue) {
+        setConfirmState({ emp, nextAction, ...issue });
+        return;
+      }
+      await finalizePunch(emp, nextAction, null);
+    } catch (e) {
+      setError("Não foi possível confirmar o ponto agora (falha de conexão). Tente novamente.");
+      setPin("");
     }
-    await finalizePunch(emp, nextAction, null);
   };
 
   const submitPin = async (fullPin) => {
@@ -713,7 +772,12 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
       const deviceId = getDeviceId();
       if (!emp.registeredDeviceId) {
         // Primeira vez desse funcionário batendo ponto: vincula este aparelho a ele automaticamente
-        await persistEmployees(employees.map(e => e.id === emp.id ? { ...e, registeredDeviceId: deviceId } : e));
+        try {
+          await persistEmployees(employees.map(e => e.id === emp.id ? { ...e, registeredDeviceId: deviceId } : e));
+        } catch (e) {
+          setError("Não foi possível verificar seu aparelho agora (falha de conexão). Tente novamente.");
+          return;
+        }
       } else if (emp.registeredDeviceId !== deviceId) {
         setDeviceBlock(emp);
         return;
@@ -722,11 +786,19 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
 
     // Busca a versão mais atual dos pontos pra decidir entrada/saída corretamente,
     // mesmo que este aparelho esteja com a tela aberta há um tempo sem atualizar.
-    const latest = await fetchLatestPunches();
-    const empPunches = latest.filter(p => p.employeeId === emp.id).sort((a, b) => new Date(b.at) - new Date(a.at));
-    const last = empPunches[0] || null;
-    const nextAction = last && last.action === "entrada" ? "saida" : "entrada";
-    setPendingConfirm({ emp, nextAction });
+    try {
+      const latest = await fetchLatestPunches();
+      const empPunches = latest.filter(p => p.employeeId === emp.id).sort((a, b) => new Date(b.at) - new Date(a.at));
+      const last = empPunches[0] || null;
+      // Se a última batida foi em outro dia (mesmo que tenha ficado em aberto, sem uma saída
+      // depois), o dia de hoje sempre começa com Entrada — evita herdar uma alternância errada
+      // de um dia anterior em que a pessoa esqueceu de bater a saída final.
+      const isSameDay = last && fmtDateKey(new Date(last.at)) === fmtDateKey(new Date());
+      const nextAction = isSameDay && last.action === "entrada" ? "saida" : "entrada";
+      setPendingConfirm({ emp, nextAction });
+    } catch (e) {
+      setError("Não foi possível verificar seus pontos agora (falha de conexão). Tente novamente.");
+    }
   };
 
   const [deviceBlock, setDeviceBlock] = useState(null);
@@ -773,8 +845,12 @@ function PunchScreen({ employees, punches, persistPunches, persistEmployees, sto
         const stillValid = active && !active.used && new Date(active.expiresAt) > new Date();
         if (stillValid && next === active.code) {
           setOvertimePinInput("");
-          await persistOvertimeCode({ ...active, used: true, usedAt: new Date().toISOString(), usedBy: confirmState?.emp?.name });
-          confirmEarly();
+          try {
+            await persistOvertimeCode({ ...active, used: true, usedAt: new Date().toISOString(), usedBy: confirmState?.emp?.name });
+            confirmEarly();
+          } catch (e) {
+            setOvertimeError(true);
+          }
         } else {
           setOvertimeError(true);
           setTimeout(() => { setOvertimePinInput(""); setOvertimeError(false); }, 600);
@@ -1088,9 +1164,16 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
       type, date, note: note.trim(), photo: photo || null,
       status: "pendente", createdAt: new Date().toISOString(), adminNote: "",
     };
-    await persistRequests([...requests, record]);
-    setSending(false); setDone(true);
-    setTimeout(onDone, 1800);
+    try {
+      const latest = await loadJSON(REQUEST_KEY, requests);
+      await persistRequests([...latest, record]);
+      setDone(true);
+      setTimeout(onDone, 1800);
+    } catch (e) {
+      window.alert("Não foi possível enviar agora (falha de conexão). Tente novamente.");
+    } finally {
+      setSending(false);
+    }
   };
 
   if (done) {
@@ -1490,7 +1573,14 @@ function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPun
     .filter(p => !filterDate || fmtDateKey(new Date(p.at)) === filterDate)
     .sort((a, b) => new Date(b.at) - new Date(a.at)), [punches, filterStore, filterEmployee, filterDate]);
 
-  const removeRecord = async (id) => { await persistPunches(punches.filter(p => p.id !== id)); };
+  const removeRecord = async (id) => {
+    try {
+      const latest = await fetchLatestPunches();
+      await persistPunches(latest.filter(p => p.id !== id));
+    } catch (e) {
+      window.alert("Não foi possível excluir agora (falha de conexão). Tente novamente.");
+    }
+  };
 
   const startEdit = (p) => {
     setEditingId(p.id);
@@ -1499,13 +1589,18 @@ function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPun
   };
   const saveEdit = async (p) => {
     setSavingEdit(true);
-    const latest = await fetchLatestPunches();
-    const dateKey = fmtDateKey(new Date(p.at));
-    const newAt = new Date(`${dateKey}T${editTime}:00`).toISOString();
-    const next = latest.map(pp => pp.id === p.id ? { ...pp, action: editAction, at: newAt } : pp);
-    await persistPunches(next);
-    setSavingEdit(false);
-    setEditingId(null);
+    try {
+      const latest = await fetchLatestPunches();
+      const dateKey = fmtDateKey(new Date(p.at));
+      const newAt = new Date(`${dateKey}T${editTime}:00`).toISOString();
+      const next = latest.map(pp => pp.id === p.id ? { ...pp, action: editAction, at: newAt } : pp);
+      await persistPunches(next);
+      setEditingId(null);
+    } catch (e) {
+      window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
   const exportCSV = () => {
@@ -1699,7 +1794,11 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
   const byWhom = currentAdmin ? ` (por ${currentAdmin.name})` : "";
 
   const setStatus = async (id, status, adminNote = "") => {
-    await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote: adminNote + byWhom, resolvedAt: new Date().toISOString() } : r));
+    try {
+      await persistRequests(requests.map(r => r.id === id ? { ...r, status, adminNote: adminNote + byWhom, resolvedAt: new Date().toISOString() } : r));
+    } catch (e) {
+      window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    }
   };
 
   const openAdjust = (r) => {
@@ -1722,22 +1821,27 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
 
   const saveAdjustment = async (r) => {
     setSaving(true);
-    const latest = await fetchLatestPunches();
-    const others = latest.filter(p => !(p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date));
-    const rebuilt = draftPunches
-      .filter(dp => dp.time)
-      .sort((a, b) => a.time.localeCompare(b.time))
-      .map((dp, idx) => ({
-        id: `${r.date}-${dp.time}-${r.employeeId}-${idx}`,
-        employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
-        action: dp.action, at: new Date(`${r.date}T${dp.time}:00`).toISOString(),
-        photo: null, location: null, distance: null, outOfRange: false,
-        adjustedByAdmin: true, requestId: r.id,
-      }));
-    await persistPunches([...others, ...rebuilt]);
-    await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)).`);
-    setSaving(false);
-    setAdjustingId(null);
+    try {
+      const latest = await fetchLatestPunches();
+      const others = latest.filter(p => !(p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date));
+      const rebuilt = draftPunches
+        .filter(dp => dp.time)
+        .sort((a, b) => a.time.localeCompare(b.time))
+        .map((dp, idx) => ({
+          id: `${r.date}-${dp.time}-${r.employeeId}-${idx}`,
+          employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
+          action: dp.action, at: new Date(`${r.date}T${dp.time}:00`).toISOString(),
+          photo: null, location: null, distance: null, outOfRange: false,
+          adjustedByAdmin: true, requestId: r.id,
+        }));
+      await persistPunches([...others, ...rebuilt]);
+      await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)).`);
+      setAdjustingId(null);
+    } catch (e) {
+      window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -1868,16 +1972,28 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
     if (!employeeId) { setErr("Selecione o funcionário."); return; }
     if (!startDate || !endDate || endDate < startDate) { setErr("Verifique as datas."); return; }
     const emp = employees.find(e => e.id === employeeId);
-    await persistLeaves([...leaves, {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      employeeId, employeeName: emp?.name || "", store: emp?.store, type, startDate, endDate, note: note.trim(),
-      photo: photo || null, createdAt: new Date().toISOString(),
-    }]);
-    setEmployeeId(""); setType(LEAVE_TYPES[0].id); setStartDate(fmtDateKey(new Date())); setEndDate(fmtDateKey(new Date()));
-    setNote(""); setPhoto(null); setErr(""); setShowForm(false);
+    try {
+      const latest = await loadJSON(LEAVE_KEY, leaves);
+      await persistLeaves([...latest, {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        employeeId, employeeName: emp?.name || "", store: emp?.store, type, startDate, endDate, note: note.trim(),
+        photo: photo || null, createdAt: new Date().toISOString(),
+      }]);
+      setEmployeeId(""); setType(LEAVE_TYPES[0].id); setStartDate(fmtDateKey(new Date())); setEndDate(fmtDateKey(new Date()));
+      setNote(""); setPhoto(null); setErr(""); setShowForm(false);
+    } catch (e) {
+      setErr("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    }
   };
 
-  const remove = async (id) => { await persistLeaves(leaves.filter(l => l.id !== id)); };
+  const remove = async (id) => {
+    try {
+      const latest = await loadJSON(LEAVE_KEY, leaves);
+      await persistLeaves(latest.filter(l => l.id !== id));
+    } catch (e) {
+      window.alert("Não foi possível excluir agora (falha de conexão). Tente novamente.");
+    }
+  };
 
   const visibleEmployees = useMemo(() => restrictedStore ? employees.filter(e => e.store === restrictedStore) : employees, [employees, restrictedStore]);
   const sorted = useMemo(() => {
@@ -1982,11 +2098,16 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
   const clearPreviousImports = async () => {
     if (!window.confirm(`Isso vai remover todos os ${importedTotal} registros já importados do Pontomais (não afeta pontos batidos normalmente no app). Confirma?`)) return;
     setClearing(true);
-    const latest = await fetchLatestPunches();
-    const kept = latest.filter(p => p.importedFrom !== "pontomais");
-    await persistPunches(kept);
-    setClearing(false);
-    setClearResult(latest.length - kept.length);
+    try {
+      const latest = await fetchLatestPunches();
+      const kept = latest.filter(p => p.importedFrom !== "pontomais");
+      await persistPunches(kept);
+      setClearResult(latest.length - kept.length);
+    } catch (e) {
+      window.alert("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    } finally {
+      setClearing(false);
+    }
   };
 
   const handleFile = async (e) => {
@@ -2015,33 +2136,38 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
     setImporting(true);
     // Busca a versão mais atual salva no banco antes de mesclar, para não sobrescrever
     // pontos batidos em outros dispositivos nesse meio-tempo.
-    const latestPunches = await fetchLatestPunches();
-    let newPunches = [];
-    const existingKeys = new Set(latestPunches.filter(p => p.importedFrom === "pontomais").map(p => `${p.employeeId}|${p.at}`));
+    try {
+      const latestPunches = await fetchLatestPunches();
+      let newPunches = [];
+      const existingKeys = new Set(latestPunches.filter(p => p.importedFrom === "pontomais").map(p => `${p.employeeId}|${p.at}`));
 
-    Object.entries(parsed.byName).forEach(([name, dates]) => {
-      const empId = mapping[name];
-      if (!empId) return;
-      const emp = employees.find(e => e.id === empId);
-      if (!emp) return;
-      dates.forEach((dt, idx) => {
-        const action = idx % 2 === 0 ? "entrada" : "saida";
-        const at = dt.toISOString();
-        const key = `${empId}|${at}`;
-        if (existingKeys.has(key)) return;
-        existingKeys.add(key);
-        newPunches.push({
-          id: `${dt.getTime()}-${empId}-${idx}`,
-          employeeId: empId, employeeName: emp.name, store: emp.store, action, at,
-          photo: null, location: null, distance: null, outOfRange: false,
-          importedFrom: "pontomais",
+      Object.entries(parsed.byName).forEach(([name, dates]) => {
+        const empId = mapping[name];
+        if (!empId) return;
+        const emp = employees.find(e => e.id === empId);
+        if (!emp) return;
+        dates.forEach((dt, idx) => {
+          const action = idx % 2 === 0 ? "entrada" : "saida";
+          const at = dt.toISOString();
+          const key = `${empId}|${at}`;
+          if (existingKeys.has(key)) return;
+          existingKeys.add(key);
+          newPunches.push({
+            id: `${dt.getTime()}-${empId}-${idx}`,
+            employeeId: empId, employeeName: emp.name, store: emp.store, action, at,
+            photo: null, location: null, distance: null, outOfRange: false,
+            importedFrom: "pontomais",
+          });
         });
       });
-    });
 
-    await persistPunches([...latestPunches, ...newPunches]);
-    setImporting(false);
-    setResult({ count: newPunches.length });
+      await persistPunches([...latestPunches, ...newPunches]);
+      setResult({ count: newPunches.length });
+    } catch (e) {
+      window.alert("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    } finally {
+      setImporting(false);
+    }
   };
 
   const mappedCount = Object.values(mapping).filter(Boolean).length;
@@ -2383,21 +2509,45 @@ function EmployeesTab({ employees, persistEmployees, restrictedStore }) {
   const addEmployee = async () => {
     if (!name.trim()) { setErr("Informe o nome."); return; }
     if (!/^\d{4}$/.test(pin)) { setErr("PIN precisa ter 4 dígitos."); return; }
-    if (employees.some(e => e.pin === pin && e.store === store)) { setErr("Esse PIN já está em uso nessa loja."); return; }
-    await persistEmployees([...employees, { id: `${Date.now()}`, name: name.trim(), pin, store, active: true, photo: refPhoto || null, schedule: null }]);
-    setName(""); setPin(""); setErr(""); setRefPhoto(null); setShowForm(false);
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      if (latest.some(e => e.pin === pin && e.store === store)) { setErr("Esse PIN já está em uso nessa loja."); return; }
+      await persistEmployees([...latest, { id: `${Date.now()}`, name: name.trim(), pin, store, active: true, photo: refPhoto || null, schedule: null }]);
+      setName(""); setPin(""); setErr(""); setRefPhoto(null); setShowForm(false);
+    } catch (e) {
+      setErr("Não foi possível salvar agora (falha de conexão). Tente novamente.");
+    }
   };
-  const toggleActive = async (id) => { await persistEmployees(employees.map(e => e.id === id ? { ...e, active: !(e.active !== false) } : e)); };
+  const toggleActive = async (id) => {
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      await persistEmployees(latest.map(e => e.id === id ? { ...e, active: !(e.active !== false) } : e));
+    } catch (e) { window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente."); }
+  };
   const toggleDeviceLock = async (id) => {
-    await persistEmployees(employees.map(e => e.id === id ? { ...e, requireDeviceLock: !e.requireDeviceLock, registeredDeviceId: null } : e));
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      await persistEmployees(latest.map(e => e.id === id ? { ...e, requireDeviceLock: !e.requireDeviceLock, registeredDeviceId: null } : e));
+    } catch (e) { window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente."); }
   };
   const releaseDevice = async (id) => {
-    await persistEmployees(employees.map(e => e.id === id ? { ...e, registeredDeviceId: null } : e));
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      await persistEmployees(latest.map(e => e.id === id ? { ...e, registeredDeviceId: null } : e));
+    } catch (e) { window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente."); }
   };
-  const removeEmployee = async (id) => { await persistEmployees(employees.filter(e => e.id !== id)); };
+  const removeEmployee = async (id) => {
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      await persistEmployees(latest.filter(e => e.id !== id));
+    } catch (e) { window.alert("Não foi possível excluir agora (falha de conexão). Tente novamente."); }
+  };
   const saveSchedule = async (id, schedule) => {
-    await persistEmployees(employees.map(e => e.id === id ? { ...e, schedule } : e));
-    setEditingSchedule(null);
+    try {
+      const latest = await loadJSON(EMP_KEY, employees);
+      await persistEmployees(latest.map(e => e.id === id ? { ...e, schedule } : e));
+      setEditingSchedule(null);
+    } catch (e) { window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente."); }
   };
 
   return (
@@ -2598,15 +2748,23 @@ function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, curren
   const addAdmin = async () => {
     if (!newName.trim()) { setAdminErr("Informe o nome."); return; }
     if (!/^\d{4,6}$/.test(newPin)) { setAdminErr("PIN precisa ter de 4 a 6 dígitos."); return; }
-    const latest = await fetchLatestAdminList();
-    if (latest.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
-    await persistAdminList([...latest, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin", store: newStore }]);
-    setNewName(""); setNewPin(""); setNewStore(STORES[0].id); setAdminErr(""); setShowAddAdmin(false);
+    try {
+      const latest = await fetchLatestAdminList();
+      if (latest.some(a => a.pin === newPin)) { setAdminErr("Esse PIN já está em uso por outro administrador."); return; }
+      await persistAdminList([...latest, { id: `admin-${Date.now()}`, name: newName.trim(), pin: newPin, role: "admin", store: newStore }]);
+      setNewName(""); setNewPin(""); setNewStore(STORES[0].id); setAdminErr(""); setShowAddAdmin(false);
+    } catch (e) {
+      setAdminErr("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    }
   };
   const removeAdmin = async (id) => {
-    const latest = await fetchLatestAdminList();
-    if (latest.length <= 1) return;
-    await persistAdminList(latest.filter(a => a.id !== id));
+    try {
+      const latest = await fetchLatestAdminList();
+      if (latest.length <= 1) return;
+      await persistAdminList(latest.filter(a => a.id !== id));
+    } catch (e) {
+      window.alert("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    }
   };
 
   const [editingId, setEditingId] = useState(null);
@@ -2619,12 +2777,16 @@ function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, curren
   const saveEditAdmin = async (id) => {
     if (!editName.trim()) { setEditErr("Informe o nome."); return; }
     if (!/^\d{4,6}$/.test(editPin)) { setEditErr("PIN precisa ter de 4 a 6 dígitos."); return; }
-    const latest = await fetchLatestAdminList();
-    if (latest.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
-    const target = latest.find(a => a.id === id);
-    if (!target) { setEditErr("Esse administrador não existe mais — atualize a página."); return; }
-    await persistAdminList(latest.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin, ...(target.role !== "master" ? { store: editStore } : {}) } : a));
-    setEditingId(null); setEditErr("");
+    try {
+      const latest = await fetchLatestAdminList();
+      if (latest.some(a => a.id !== id && a.pin === editPin)) { setEditErr("Esse PIN já está em uso por outro administrador."); return; }
+      const target = latest.find(a => a.id === id);
+      if (!target) { setEditErr("Esse administrador não existe mais — atualize a página."); return; }
+      await persistAdminList(latest.map(a => a.id === id ? { ...a, name: editName.trim(), pin: editPin, ...(target.role !== "master" ? { store: editStore } : {}) } : a));
+      setEditingId(null); setEditErr("");
+    } catch (e) {
+      setEditErr("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    }
   };
 
   const useCurrentLocation = async (storeId) => {
@@ -2638,12 +2800,16 @@ function SettingsTab({ adminList, persistAdminList, fetchLatestAdminList, curren
   const saveCoords = async () => {
     // Busca a versão mais recente salva antes de gravar, e só sobrescreve a(s) loja(s)
     // que esse administrador realmente pode editar — evita apagar a configuração de outra loja.
-    const latest = await fetchLatestStoreCoords();
-    const editableStores = restrictedStore ? [restrictedStore] : STORES.map(s => s.id);
-    const merged = { ...latest };
-    editableStores.forEach(id => { merged[id] = localCoords[id]; });
-    await persistStoreCoords(merged);
-    setLocalCoords(merged);
+    try {
+      const latest = await fetchLatestStoreCoords();
+      const editableStores = restrictedStore ? [restrictedStore] : STORES.map(s => s.id);
+      const merged = { ...latest };
+      editableStores.forEach(id => { merged[id] = localCoords[id]; });
+      await persistStoreCoords(merged);
+      setLocalCoords(merged);
+    } catch (e) {
+      window.alert("Não foi possível confirmar os dados agora (falha de conexão). Tente novamente.");
+    }
   };
 
   return (
@@ -2781,10 +2947,14 @@ function OvertimeCodeGenerator({ overtimeCode, persistOvertimeCode, currentAdmin
     const code = String(Math.floor(1000 + Math.random() * 9000));
     const createdAt = new Date();
     const expiresAt = new Date(createdAt.getTime() + OVERTIME_CODE_VALID_MIN * 60000);
-    await persistOvertimeCode({
-      code, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString(),
-      used: false, generatedBy: currentAdmin?.name || "Admin",
-    });
+    try {
+      await persistOvertimeCode({
+        code, createdAt: createdAt.toISOString(), expiresAt: expiresAt.toISOString(),
+        used: false, generatedBy: currentAdmin?.name || "Admin",
+      });
+    } catch (e) {
+      window.alert("Não foi possível gerar o código agora (falha de conexão). Tente novamente.");
+    }
   };
 
   if (isActive) {
