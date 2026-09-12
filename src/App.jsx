@@ -1822,9 +1822,13 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
   const saveAdjustment = async (r) => {
     setSaving(true);
     try {
+      // Se ficou algo digitado no campo de "nova batida" sem ter clicado em "Adicionar batida",
+      // inclui automaticamente aqui — evita perder uma batida só porque esse clique extra foi
+      // esquecido (o valor já aparecia escrito no campo, então parecia que já tinha sido incluído).
+      const finalDrafts = newTime ? [...draftPunches, { key: `new-${Date.now()}`, time: newTime, action: newAction }] : draftPunches;
       const latest = await fetchLatestPunches();
       const others = latest.filter(p => !(p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date));
-      const rebuilt = draftPunches
+      const rebuilt = finalDrafts
         .filter(dp => dp.time)
         .sort((a, b) => a.time.localeCompare(b.time))
         .map((dp, idx) => ({
@@ -1917,6 +1921,7 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
                     </button>
                   </div>
                 ))}
+                <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 4 }}>Adicionar nova batida:</div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <select value={newAction} onChange={e => setNewAction(e.target.value)} style={{ ...selectStyle, width: 110 }}>
                     <option value="entrada">Entrada</option>
