@@ -296,11 +296,13 @@ function computePeriodSummary(punches, leaves, employees, storeFilter, startISO,
     let lateCount = 0, earlyLeaveCount = 0;
     let prevDateKey = null, dayIdx = 0;
     const punchDetails = [];
+    const countsByDate = {};
+    empPunches.forEach(p => { const k = fmtDateKey(new Date(p.at)); countsByDate[k] = (countsByDate[k] || 0) + 1; });
     for (let i = 0; i < empPunches.length; i++) {
       const dateKey = fmtDateKey(new Date(empPunches[i].at));
       dayIdx = dateKey === prevDateKey ? dayIdx + 1 : 0;
       prevDateKey = dateKey;
-      const status = getScheduleStatus(empPunches[i], emp, dayIdx);
+      const status = getScheduleStatus(empPunches[i], emp, dayIdx, countsByDate[dateKey]);
       if (status?.label?.startsWith("Atraso")) lateCount++;
       if (status?.label?.startsWith("Saída antecipada")) earlyLeaveCount++;
       punchDetails.push({
@@ -377,7 +379,7 @@ function countTodayPunches(punches, employeeId) {
   return punches.filter(p => p.employeeId === employeeId && fmtDateKey(new Date(p.at)) === todayKey).length;
 }
 
-function getScheduleStatus(punch, employee, dayIdx = 0) {
+function getScheduleStatus(punch, employee, dayIdx = 0, totalToday = 1) {
   const norm = normalizeSchedule(employee?.schedule);
   if (!norm) return null;
   const d = new Date(punch.at);
@@ -385,8 +387,12 @@ function getScheduleStatus(punch, employee, dayIdx = 0) {
   const info = norm.perDay[day];
   if (!info) return { label: "Fora da escala", color: COLORS.amber };
   const hasLunch = !!info.lunch;
-  // Pontos de almoço (índices 1 e 2 do dia, quando há intervalo) não são avaliados
-  if (hasLunch && (dayIdx === 1 || dayIdx === 2)) return { label: "Intervalo", color: COLORS.textDim };
+  // Pontos "do meio" do dia (nem a primeira entrada, nem a última batida) são o
+  // intervalo de almoço, quando o dia tem intervalo configurado. A última batida do
+  // dia é sempre avaliada como saída de verdade (mesmo que sejam só 2 batidas no total),
+  // pra não esconder um dia em que a pessoa saiu e não voltou mais.
+  const isLast = dayIdx === totalToday - 1;
+  if (hasLunch && dayIdx > 0 && !(isLast && punch.action === "saida")) return { label: "Intervalo", color: COLORS.textDim };
   const punchMin = d.getHours() * 60 + d.getMinutes();
   const tol = norm.tolerance ?? 10;
   if (punch.action === "entrada") {
@@ -1801,11 +1807,11 @@ function RecordsTab({ employees, punches, persistPunches, leaves, fetchLatestPun
         ) : rows.map((p, i) => {
           const emp = employees.find(e => e.id === p.employeeId);
           const dayKey = fmtDateKey(new Date(p.at));
-          const dayIdx = punches
+          const dayPunchesForEmp = punches
             .filter(pp => pp.employeeId === p.employeeId && fmtDateKey(new Date(pp.at)) === dayKey)
-            .sort((a, b) => new Date(a.at) - new Date(b.at))
-            .findIndex(pp => pp.id === p.id);
-          const status = getScheduleStatus(p, emp, dayIdx);
+            .sort((a, b) => new Date(a.at) - new Date(b.at));
+          const dayIdx = dayPunchesForEmp.findIndex(pp => pp.id === p.id);
+          const status = getScheduleStatus(p, emp, dayIdx, dayPunchesForEmp.length);
           return (
           <div key={p.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", cursor: p.photo || p.location ? "pointer" : "default" }}
