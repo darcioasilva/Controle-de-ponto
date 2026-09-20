@@ -1455,11 +1455,24 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
     [punches, leaves, emp, startISO, endISO, holidays]
   );
   const allPunches = summary.punchDetails;
+  const holidaySet = useMemo(() => new Set((holidays || []).map(h => h.date)), [holidays]);
+  const empLeavesForCalc = useMemo(() => leaves.filter(l => l.employeeId === emp.id), [leaves, emp]);
   const groupedByDate = useMemo(() => {
     const map = {};
     allPunches.forEach(p => { (map[p.date] = map[p.date] || []).push(p); });
-    return Object.entries(map);
-  }, [allPunches]);
+    return Object.entries(map).map(([date, list]) => {
+      let realizadoMin = 0;
+      for (let i = 0; i < list.length; i++) {
+        if (list[i].action === "entrada" && list[i + 1]?.action === "saida") {
+          const a = new Date(`${date}T${list[i].time}`), b = new Date(`${date}T${list[i + 1].time}`);
+          realizadoMin += (b - a) / 60000;
+          i++;
+        }
+      }
+      const previstoMin = computeExpectedMinutes(emp.schedule, date, date, holidaySet, empLeavesForCalc);
+      return { date, list, realizadoMin, previstoMin };
+    });
+  }, [allPunches, emp.schedule, holidaySet, empLeavesForCalc]);
   const myRequests = useMemo(
     () => requests.filter(r => r.employeeId === emp.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
     [requests, emp]
@@ -1523,25 +1536,53 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
             </div>
           </div>
 
-          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "auto" }}>
             {groupedByDate.length === 0 ? (
               <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum ponto nesse período.</div>
-            ) : groupedByDate.map(([date, list], i) => (
-              <div key={date} style={{ padding: "10px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{fmtDate(new Date(date + "T00:00:00"))}</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
-                  {list.map((p, idx) => (
-                    <div key={idx} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
-                      <span style={{ fontFamily: FONT_MONO, fontSize: 13 }}>
-                        <span style={{ color: COLORS.textDim }}>{p.time.slice(0, 5)}</span>{" "}
-                        <span style={{ color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>{p.action === "entrada" ? "Entrada" : "Saída"}</span>
-                      </span>
-                      <span style={{ fontSize: 10, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+            ) : (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 480 }}>
+                <thead>
+                  <tr>
+                    <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "left", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Data</th>
+                    <th colSpan={4} style={{ padding: "6px 10px 4px", color: COLORS.textDim, fontWeight: 600, textAlign: "center", borderBottom: `1px solid ${COLORS.border}` }}>Pontos do dia</th>
+                    <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "right", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Realizado</th>
+                    <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "right", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Previsto</th>
+                  </tr>
+                  <tr>
+                    {["Entrada", "Saída", "Entrada", "Saída"].map((h, i) => (
+                      <th key={i} style={{ padding: "0 6px 6px", color: COLORS.textDim, fontWeight: 600, textAlign: "center", borderBottom: `1px solid ${COLORS.border}`, fontSize: 11 }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {groupedByDate.map(({ date, list, realizadoMin, previstoMin }, i) => {
+                    const deltaDay = realizadoMin - previstoMin;
+                    return (
+                      <tr key={date} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                        <td style={{ padding: "8px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{fmtDate(new Date(date + "T00:00:00"))}</td>
+                        {[0, 1, 2, 3].map(slot => {
+                          const p = list[slot];
+                          return (
+                            <td key={slot} style={{ padding: "8px 6px", textAlign: "center", fontFamily: FONT_MONO }}>
+                              {p ? (
+                                <div style={{ display: "flex", flexDirection: "column", alignItems: "center" }}>
+                                  <span style={{ color: p.statusColor }}>{p.time.slice(0, 5)}</span>
+                                  {p.statusLabel && p.statusLabel !== "Intervalo" && p.statusLabel !== "No horário" && (
+                                    <span style={{ fontSize: 9, color: p.statusColor, fontFamily: FONT_UI }}>{p.statusLabel}</span>
+                                  )}
+                                </div>
+                              ) : "—"}
+                            </td>
+                          );
+                        })}
+                        <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: FONT_MONO, fontWeight: 700, color: deltaDay < 0 ? COLORS.red : COLORS.teal }}>{fmtDuration(realizadoMin)}</td>
+                        <td style={{ padding: "8px 10px", textAlign: "right", fontFamily: FONT_MONO, color: COLORS.textDim }}>{fmtDuration(previstoMin)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </>
       ) : (
