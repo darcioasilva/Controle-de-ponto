@@ -1420,6 +1420,7 @@ const INACTIVITY_MS = 90000; // fecha sozinho depois de 90s sem uso (protege dis
 
 function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onFullExit }) {
   const [tab, setTab] = useState("pontos");
+  const [detailView, setDetailView] = useState("punches"); // punches | intervals
   const [periodType, setPeriodType] = useState("week"); // week | month | custom
   const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
   const [customEnd, setCustomEnd] = useState(fmtDateKey(new Date()));
@@ -1512,20 +1513,57 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
             </div>
           </div>
 
-          <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
-            {mainPunches.length === 0 ? (
-              <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum ponto nesse período.</div>
-            ) : mainPunches.map((p, i) => (
-              <div key={i} style={{ display: "flex", gap: 10, padding: "10px 14px", alignItems: "center", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
-                <span style={{ width: 76, fontSize: 13, fontWeight: 600 }}>{fmtDate(new Date(p.date + "T00:00:00"))}</span>
-                <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 58 }}>{p.time.slice(0, 5)}</span>
-                <span style={{ width: 60, fontSize: 12, color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>
-                  {p.action === "entrada" ? "Entrada" : "Saída"}
-                </span>
-                <span style={{ fontSize: 11, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
-              </div>
-            ))}
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={() => setDetailView("punches")} style={{
+              ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+              background: detailView === "punches" ? COLORS.surfaceRaised : "transparent",
+              color: detailView === "punches" ? COLORS.text : COLORS.textDim,
+            }}>Entrada/Saída</button>
+            <button onClick={() => setDetailView("intervals")} style={{
+              ...ghostBtnStyle, padding: "5px 10px", fontSize: 11,
+              background: detailView === "intervals" ? COLORS.surfaceRaised : "transparent",
+              color: detailView === "intervals" ? COLORS.text : COLORS.textDim,
+            }}>Intervalos de almoço</button>
           </div>
+
+          {detailView === "punches" ? (
+            <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+              {mainPunches.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum ponto nesse período.</div>
+              ) : mainPunches.map((p, i) => (
+                <div key={i} style={{ display: "flex", gap: 10, padding: "10px 14px", alignItems: "center", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                  <span style={{ width: 76, fontSize: 13, fontWeight: 600 }}>{fmtDate(new Date(p.date + "T00:00:00"))}</span>
+                  <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 58 }}>{p.time.slice(0, 5)}</span>
+                  <span style={{ width: 60, fontSize: 12, color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>
+                    {p.action === "entrada" ? "Entrada" : "Saída"}
+                  </span>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+              {summary.intervalDetails.length === 0 ? (
+                <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum intervalo nesse período.</div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 11, color: COLORS.textDim, padding: "10px 14px 0" }}>
+                    Esperado: {summary.intervalDetails[0]?.expectedMin ?? "—"}min
+                  </div>
+                  {summary.intervalDetails.map((d, i) => (
+                    <div key={i} style={{ display: "flex", gap: 10, padding: "10px 14px", alignItems: "center", borderTop: `1px solid ${COLORS.border}` }}>
+                      <span style={{ width: 76, fontSize: 13, fontWeight: 600 }}>{fmtDate(new Date(d.date + "T00:00:00"))}</span>
+                      <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, fontSize: 12 }}>{fmtTime(d.outAt)} → {fmtTime(d.returnAt)}</span>
+                      <span style={{
+                        fontFamily: FONT_MONO, fontWeight: 700, fontSize: 12, marginLeft: "auto",
+                        color: d.flag === "anomalia" ? "#C77DB0" : d.flag === "long" ? COLORS.red : d.flag === "short" ? COLORS.amber : COLORS.teal,
+                      }}>{d.durationMin}min</span>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
+          )}
         </>
       ) : (
         <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
