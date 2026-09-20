@@ -2560,7 +2560,7 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
       const grouped = groupPunchesByDay(s.punchDetails, s.emp.schedule, holidaySet, empLeaves);
       grouped.forEach(({ date, list, realizadoMin, previstoMin }) => {
         const slot = (i) => list[i] ? list[i].time.slice(0, 5) : "";
-        const hasAtestado = empLeaves.some(l => l.type === "atestado" && l.startDate <= date && l.endDate >= date);
+        const hasAtestado = empLeaves.some(l => l.type === "atestado" && l.photo && l.startDate <= date && l.endDate >= date);
         rows2.push([
           s.emp.name,
           fmtDate(new Date(date + "T00:00:00")),
