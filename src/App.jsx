@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Papa from "papaparse";
+import JSZip from "jszip";
 import {
   Clock, Check, X, Users, ListChecks, Lock, Plus, Trash2, Download, ChevronLeft,
   AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet, Upload
@@ -2552,19 +2553,21 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
   );
 
   const exportCSV = () => {
-    const header = "Funcionário,Data,Entrada,Saída,Entrada,Saída,Realizado,Previsto\n";
+    const header = "Funcionário,Data,Entrada,Saída,Entrada,Saída,Realizado,Previsto,Atestado\n";
     const rows2 = [];
     summary.forEach(s => {
       const empLeaves = leaves.filter(l => l.employeeId === s.emp.id);
       const grouped = groupPunchesByDay(s.punchDetails, s.emp.schedule, holidaySet, empLeaves);
       grouped.forEach(({ date, list, realizadoMin, previstoMin }) => {
         const slot = (i) => list[i] ? list[i].time.slice(0, 5) : "";
+        const hasAtestado = empLeaves.some(l => l.type === "atestado" && l.startDate <= date && l.endDate >= date);
         rows2.push([
           s.emp.name,
           fmtDate(new Date(date + "T00:00:00")),
           slot(0), slot(1), slot(2), slot(3),
           fmtDuration(realizadoMin).replace("h", ":").padEnd(5, "0"),
           fmtDuration(previstoMin).replace("h", ":").padEnd(5, "0"),
+          hasAtestado ? "Sim" : "Não",
         ].join(","));
       });
     });
@@ -2573,6 +2576,36 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
     const a = document.createElement("a");
     a.href = url; a.download = `fechamento-${startISO}-a-${endISO}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const [zipping, setZipping] = useState(false);
+  const downloadAtestadosZip = async () => {
+    const relevantLeaves = leaves.filter(l =>
+      l.type === "atestado" && l.photo &&
+      l.startDate <= endISO && l.endDate >= startISO &&
+      (storeFilter === "all" || l.store === storeFilter)
+    );
+    if (relevantLeaves.length === 0) { window.alert("Nenhum atestado com foto nesse período."); return; }
+    setZipping(true);
+    try {
+      const zip = new JSZip();
+      relevantLeaves.forEach((l, i) => {
+        const match = /^data:image\/(\w+);base64,(.*)$/.exec(l.photo || "");
+        if (!match) return;
+        const [, ext, base64] = match;
+        const safeName = (l.employeeName || "funcionario").replace(/[^\w\d]+/g, "_");
+        zip.file(`${safeName}_${l.startDate}${l.endDate !== l.startDate ? "_a_" + l.endDate : ""}_${i}.${ext}`, base64, { base64: true });
+      });
+      const blob = await zip.generateAsync({ type: "blob" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `atestados-${startISO}-a-${endISO}.zip`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      window.alert("Não foi possível gerar o arquivo agora. Tente novamente.");
+    } finally {
+      setZipping(false);
+    }
   };
 
   return (
@@ -2607,6 +2640,9 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
         )}
         <button onClick={exportCSV} style={{ ...ghostBtnStyle, marginLeft: "auto", color: COLORS.amber, borderColor: COLORS.amberDim }}>
           <Download size={14} /> Exportar CSV para contabilidade
+        </button>
+        <button onClick={downloadAtestadosZip} disabled={zipping} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, opacity: zipping ? 0.6 : 1 }}>
+          <Download size={14} /> {zipping ? "Preparando…" : "Baixar atestados do período"}
         </button>
       </div>
       <div style={{ color: COLORS.textDim, fontSize: 12, textTransform: "capitalize" }}>{periodLabel}</div>
