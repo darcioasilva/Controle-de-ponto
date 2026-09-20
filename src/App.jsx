@@ -1455,6 +1455,11 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
     [punches, leaves, emp, startISO, endISO, holidays]
   );
   const allPunches = summary.punchDetails;
+  const groupedByDate = useMemo(() => {
+    const map = {};
+    allPunches.forEach(p => { (map[p.date] = map[p.date] || []).push(p); });
+    return Object.entries(map);
+  }, [allPunches]);
   const myRequests = useMemo(
     () => requests.filter(r => r.employeeId === emp.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
     [requests, emp]
@@ -1519,16 +1524,22 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
           </div>
 
           <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
-            {allPunches.length === 0 ? (
+            {groupedByDate.length === 0 ? (
               <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum ponto nesse período.</div>
-            ) : allPunches.map((p, i) => (
-              <div key={i} style={{ display: "flex", gap: 10, padding: "10px 14px", alignItems: "center", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
-                <span style={{ width: 76, fontSize: 13, fontWeight: 600 }}>{fmtDate(new Date(p.date + "T00:00:00"))}</span>
-                <span style={{ fontFamily: FONT_MONO, color: COLORS.textDim, width: 58 }}>{p.time.slice(0, 5)}</span>
-                <span style={{ width: 60, fontSize: 12, color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>
-                  {p.action === "entrada" ? "Entrada" : "Saída"}
-                </span>
-                <span style={{ fontSize: 11, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
+            ) : groupedByDate.map(([date, list], i) => (
+              <div key={date} style={{ padding: "10px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>{fmtDate(new Date(date + "T00:00:00"))}</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 14 }}>
+                  {list.map((p, idx) => (
+                    <div key={idx} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start" }}>
+                      <span style={{ fontFamily: FONT_MONO, fontSize: 13 }}>
+                        <span style={{ color: COLORS.textDim }}>{p.time.slice(0, 5)}</span>{" "}
+                        <span style={{ color: p.action === "entrada" ? COLORS.teal : COLORS.amber }}>{p.action === "entrada" ? "Entrada" : "Saída"}</span>
+                      </span>
+                      <span style={{ fontSize: 10, fontWeight: 600, color: p.statusColor }}>{p.statusLabel || "—"}</span>
+                    </div>
+                  ))}
+                </div>
               </div>
             ))}
           </div>
