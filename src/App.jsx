@@ -358,7 +358,7 @@ function DayPunchesTable({ groupedByDate, empLeaves }) {
   }
 
   return (
-    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 520 }}>
+    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 560 }}>
       <thead>
         <tr>
           <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "left", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Data</th>
@@ -366,6 +366,7 @@ function DayPunchesTable({ groupedByDate, empLeaves }) {
           <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "right", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Realizado</th>
           <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "right", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Previsto</th>
           <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "center", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Atestado</th>
+          <th rowSpan={2} style={{ padding: "8px 10px", color: COLORS.textDim, fontWeight: 600, textAlign: "center", verticalAlign: "bottom", borderBottom: `1px solid ${COLORS.border}` }}>Situação</th>
         </tr>
         <tr>
           {["Entrada", "Saída", "Entrada", "Saída"].map((h, i) => (
@@ -374,11 +375,14 @@ function DayPunchesTable({ groupedByDate, empLeaves }) {
         </tr>
       </thead>
       <tbody>
-        {groupedByDate.map(({ date, list, realizadoMin, previstoMin }, i) => {
+        {groupedByDate.map(({ date, list, realizadoMin, previstoMin, kind }, i) => {
           const deltaDay = realizadoMin - previstoMin;
           const leaveWithPhoto = leavesByDate[date];
+          const rowBg = kind === "falta" ? "rgba(217,104,92,0.15)" : kind === "atestado" ? "rgba(232,163,57,0.12)" : "transparent";
+          const situacaoLabel = kind === "falta" ? "Falta" : kind === "atestado" ? "Atestado" : kind === "abono" ? "Abonado" : "";
+          const situacaoColor = kind === "falta" ? COLORS.red : kind === "atestado" ? COLORS.amber : COLORS.textDim;
           return (
-            <tr key={date} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+            <tr key={date} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none", background: rowBg }}>
               <td style={{ padding: "8px 10px", fontWeight: 600, whiteSpace: "nowrap" }}>{fmtDate(new Date(date + "T00:00:00"))}</td>
               {[0, 1, 2, 3].map(slot => {
                 const p = list[slot];
@@ -403,6 +407,7 @@ function DayPunchesTable({ groupedByDate, empLeaves }) {
                     style={{ width: 34, height: 34, objectFit: "cover", borderRadius: 6, border: `1px solid ${COLORS.border}`, cursor: "pointer" }} />
                 ) : "—"}
               </td>
+              <td style={{ padding: "8px 10px", textAlign: "center", fontWeight: 700, color: situacaoColor, fontSize: 11 }}>{situacaoLabel || "—"}</td>
             </tr>
           );
         })}
@@ -410,7 +415,7 @@ function DayPunchesTable({ groupedByDate, empLeaves }) {
       {expandedPhoto && (
         <tfoot>
           <tr>
-            <td colSpan={8} style={{ padding: 12 }}>
+            <td colSpan={9} style={{ padding: 12 }}>
               <div onClick={() => setExpandedPhoto(null)} style={{ cursor: "pointer" }}>
                 <img src={expandedPhoto} alt="Atestado ampliado" style={{ width: "100%", maxHeight: 320, objectFit: "contain", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
                 <div style={{ fontSize: 11, color: COLORS.textDim, marginTop: 4, textAlign: "center" }}>Toque pra fechar</div>
@@ -1601,8 +1606,8 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
   const holidaySet = useMemo(() => new Set((holidays || []).map(h => h.date)), [holidays]);
   const empLeavesForCalc = useMemo(() => leaves.filter(l => l.employeeId === emp.id), [leaves, emp]);
   const groupedByDate = useMemo(
-    () => groupPunchesByDay(allPunches, emp.schedule, holidaySet, empLeavesForCalc),
-    [allPunches, emp.schedule, holidaySet, empLeavesForCalc]
+    () => buildFullDayRows(emp.schedule, startISO, endISO, holidaySet, empLeavesForCalc, allPunches),
+    [allPunches, emp.schedule, holidaySet, empLeavesForCalc, startISO, endISO]
   );
   const myRequests = useMemo(
     () => requests.filter(r => r.employeeId === emp.id).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt)),
