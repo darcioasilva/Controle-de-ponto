@@ -1911,22 +1911,6 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
   // Aprovar um atestado médico já cria a ausência correspondente (dia inteiro, ou só o
   // período informado, se a funcionária marcou que foi parcial) — sem precisar de um
   // segundo passo manual em Ausências.
-  const approveAtestado = async (r) => {
-    try {
-      const latestLeaves = await loadJSON(LEAVE_KEY, leaves);
-      await persistLeaves([...latestLeaves, {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
-        type: "atestado", startDate: r.date, endDate: r.date, note: r.note,
-        ...(r.partialStart && r.partialEnd ? { partialStart: r.partialStart, partialEnd: r.partialEnd } : {}),
-        photo: r.photo || null, createdAt: new Date().toISOString(),
-      }]);
-      await setStatus(r.id, "aprovada", `Atestado aprovado e ausência registrada (${r.partialStart && r.partialEnd ? `${r.partialStart}–${r.partialEnd}` : "dia inteiro"}).`);
-    } catch (e) {
-      window.alert("Não foi possível aprovar agora (falha de conexão). Tente novamente.");
-    }
-  };
-
   const openAdjust = (r) => {
     const dayPunches = punches
       .filter(p => p.employeeId === r.employeeId && fmtDateKey(new Date(p.at)) === r.date)
@@ -1965,7 +1949,22 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
           adjustedByAdmin: true, requestId: r.id,
         }));
       await persistPunches([...others, ...rebuilt]);
-      await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)).`);
+      // Atestado (dia inteiro ou período parcial): além de ajustar os pontos do dia,
+      // registra a ausência correspondente, tudo numa única aprovação.
+      if (r.type === "atestado") {
+        const latestLeaves = await loadJSON(LEAVE_KEY, leaves);
+        await persistLeaves([...latestLeaves, {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          employeeId: r.employeeId, employeeName: r.employeeName, store: r.store,
+          type: "atestado", startDate: r.date, endDate: r.date, note: r.note,
+          ...(r.partialStart && r.partialEnd ? { partialStart: r.partialStart, partialEnd: r.partialEnd } : {}),
+          photo: r.photo || null, createdAt: new Date().toISOString(),
+        }]);
+        const periodo = r.partialStart && r.partialEnd ? `${r.partialStart}–${r.partialEnd}` : "dia inteiro";
+        await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)) e ausência (${periodo}) registrada.`);
+      } else {
+        await setStatus(r.id, "aprovada", `Ponto de ${fmtDate(new Date(r.date + "T00:00:00"))} ajustado (${rebuilt.length} batida(s)).`);
+      }
       setAdjustingId(null);
     } catch (e) {
       window.alert("Não foi possível salvar agora (falha de conexão). Tente novamente.");
@@ -1991,7 +1990,6 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
         {rows.length === 0 ? (
           <div style={{ padding: 28, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhuma solicitação aqui.</div>
         ) : rows.map((r, i) => {
-          const needsPunchEdit = r.type === "correcao" || r.type === "esqueci";
           return (
           <div key={r.id} style={{ borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none", padding: 14 }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
@@ -2012,19 +2010,9 @@ function RequestsTab({ requests, persistRequests, punches, persistPunches, fetch
 
             {r.status === "pendente" && adjustingId !== r.id && (
               <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
-                {needsPunchEdit ? (
-                  <button onClick={() => openAdjust(r)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, padding: "6px 10px", fontSize: 12 }}>
-                    <Clock size={13} /> Ajustar ponto e aprovar
-                  </button>
-                ) : r.type === "atestado" ? (
-                  <button onClick={() => approveAtestado(r)} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
-                    <CheckCircle2 size={13} /> Aprovar (registra ausência)
-                  </button>
-                ) : (
-                  <button onClick={() => setStatus(r.id, "aprovada")} style={{ ...ghostBtnStyle, color: COLORS.teal, borderColor: COLORS.teal, padding: "6px 10px", fontSize: 12 }}>
-                    <CheckCircle2 size={13} /> Aprovar
-                  </button>
-                )}
+                <button onClick={() => openAdjust(r)} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, padding: "6px 10px", fontSize: 12 }}>
+                  <Clock size={13} /> Ajustar ponto e aprovar
+                </button>
                 <button onClick={() => setStatus(r.id, "rejeitada")} style={{ ...ghostBtnStyle, color: COLORS.red, borderColor: COLORS.red, padding: "6px 10px", fontSize: 12 }}>
                   <XCircle size={13} /> Rejeitar
                 </button>
