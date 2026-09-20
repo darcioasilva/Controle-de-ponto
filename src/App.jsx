@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import Papa from "papaparse";
 import JSZip from "jszip";
+import ExcelJS from "exceljs";
 import {
   Clock, Check, X, Users, ListChecks, Lock, Plus, Trash2, Download, ChevronLeft,
   AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet, Upload
@@ -299,6 +300,40 @@ function groupPunchesByDay(punchDetails, schedule, holidaySet, empLeaves) {
     const previstoMin = computeExpectedMinutes(schedule, date, date, holidaySet, empLeaves);
     return { date, list, realizadoMin, previstoMin };
   });
+}
+
+// Monta a lista de TODOS os dias esperados do período (não só os que têm ponto batido),
+// marcando cada um como normal, abonado (com/sem foto de atestado) ou falta — usado na
+// exportação em Excel, pra poder colorir as linhas de falta e de atestado.
+function buildFullDayRows(schedule, startISO, endISO, holidaySet, empLeaves, punchDetails) {
+  const byDate = {};
+  groupPunchesByDay(punchDetails, schedule, holidaySet, empLeaves).forEach(g => { byDate[g.date] = g; });
+  const norm = normalizeSchedule(schedule);
+  const rows = [];
+  const d = new Date(startISO + "T00:00:00");
+  const end = new Date(endISO + "T00:00:00");
+  while (d <= end) {
+    const dateKey = fmtDateKey(d);
+    if (!holidaySet.has(dateKey)) {
+      const info = norm?.perDay?.[d.getDay()];
+      if (info) {
+        const fullDayLeave = empLeaves.find(l => l.startDate <= dateKey && l.endDate >= dateKey && !(l.startDate === l.endDate && l.partialStart && l.partialEnd));
+        const partialLeave = empLeaves.find(l => l.startDate === dateKey && l.endDate === dateKey && l.partialStart && l.partialEnd);
+        const dayGroup = byDate[dateKey];
+        const hasAtestadoPhoto = !!((fullDayLeave?.type === "atestado" && fullDayLeave.photo) || (partialLeave?.type === "atestado" && partialLeave.photo));
+        if (dayGroup) {
+          rows.push({ ...dayGroup, kind: hasAtestadoPhoto ? "atestado" : "normal" });
+        } else if (fullDayLeave) {
+          rows.push({ date: dateKey, list: [], realizadoMin: 0, previstoMin: 0, kind: hasAtestadoPhoto ? "atestado" : "abono" });
+        } else {
+          const previstoMin = computeExpectedMinutes(schedule, dateKey, dateKey, holidaySet, empLeaves);
+          rows.push({ date: dateKey, list: [], realizadoMin: 0, previstoMin, kind: "falta" });
+        }
+      }
+    }
+    d.setDate(d.getDate() + 1);
+  }
+  return rows;
 }
 
 // Componente de tabela usado tanto em "Meus Pontos" (funcionário) quanto no detalhe
@@ -2552,30 +2587,60 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
     [summary]
   );
 
-  const exportCSV = () => {
-    const header = "Funcionário,Data,Entrada,Saída,Entrada,Saída,Realizado,Previsto,Atestado\n";
-    const rows2 = [];
-    summary.forEach(s => {
-      const empLeaves = leaves.filter(l => l.employeeId === s.emp.id);
-      const grouped = groupPunchesByDay(s.punchDetails, s.emp.schedule, holidaySet, empLeaves);
-      grouped.forEach(({ date, list, realizadoMin, previstoMin }) => {
-        const slot = (i) => list[i] ? list[i].time.slice(0, 5) : "";
-        const hasAtestado = empLeaves.some(l => l.type === "atestado" && l.photo && l.startDate <= date && l.endDate >= date);
-        rows2.push([
-          s.emp.name,
-          fmtDate(new Date(date + "T00:00:00")),
-          slot(0), slot(1), slot(2), slot(3),
-          fmtDuration(realizadoMin).replace("h", ":").padEnd(5, "0"),
-          fmtDuration(previstoMin).replace("h", ":").padEnd(5, "0"),
-          hasAtestado ? "Sim" : "Não",
-        ].join(","));
+  const [exporting, setExporting] = useState(false);
+  const exportXLSX = async () => {
+    setExporting(true);
+    try {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet("Fechamento");
+      ws.columns = [
+        { header: "Funcionário", key: "nome", width: 26 },
+        { header: "Data", key: "data", width: 12 },
+        { header: "Entrada", key: "e1", width: 10 },
+        { header: "Saída", key: "s1", width: 10 },
+        { header: "Entrada", key: "e2", width: 10 },
+        { header: "Saída", key: "s2", width: 10 },
+        { header: "Realizado", key: "real", width: 11 },
+        { header: "Previsto", key: "prev", width: 11 },
+        { header: "Atestado", key: "atestado", width: 10 },
+        { header: "Situação", key: "situacao", width: 14 },
+      ];
+      ws.getRow(1).font = { bold: true };
+
+      const FILL_FALTA = { type: "pattern", pattern: "solid", fgColor: { argb: "FFF4A6A6" } };
+      const FILL_ATESTADO = { type: "pattern", pattern: "solid", fgColor: { argb: "FFFFD98C" } };
+
+      summary.forEach(s => {
+        const empLeaves = leaves.filter(l => l.employeeId === s.emp.id);
+        const rows = buildFullDayRows(s.emp.schedule, startISO, endISO, holidaySet, empLeaves, s.punchDetails);
+        rows.forEach(({ date, list, realizadoMin, previstoMin, kind }) => {
+          const slot = (i) => list[i] ? list[i].time.slice(0, 5) : "";
+          const situacaoLabel = kind === "falta" ? "Falta" : kind === "atestado" ? "Atestado" : kind === "abono" ? "Abonado" : "";
+          const row = ws.addRow({
+            nome: s.emp.name,
+            data: fmtDate(new Date(date + "T00:00:00")),
+            e1: slot(0), s1: slot(1), e2: slot(2), s2: slot(3),
+            real: fmtDuration(realizadoMin).replace("h", ":").padEnd(5, "0"),
+            prev: fmtDuration(previstoMin).replace("h", ":").padEnd(5, "0"),
+            atestado: kind === "atestado" ? "Sim" : "Não",
+            situacao: situacaoLabel,
+          });
+          if (kind === "falta") row.eachCell(c => { c.fill = FILL_FALTA; });
+          else if (kind === "atestado") row.eachCell(c => { c.fill = FILL_ATESTADO; });
+        });
       });
-    });
-    const blob = new Blob([header + rows2.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = `fechamento-${startISO}-a-${endISO}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
-    URL.revokeObjectURL(url);
+
+      const buffer = await wb.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = `fechamento-${startISO}-a-${endISO}${storeFilter !== "all" ? "-" + storeFilter : ""}.xlsx`; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      window.alert("Não foi possível gerar a planilha agora. Tente novamente.");
+    } finally {
+      setExporting(false);
+    }
   };
 
   const [zipping, setZipping] = useState(false);
@@ -2638,8 +2703,8 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
             {STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
           </select>
         )}
-        <button onClick={exportCSV} style={{ ...ghostBtnStyle, marginLeft: "auto", color: COLORS.amber, borderColor: COLORS.amberDim }}>
-          <Download size={14} /> Exportar CSV para contabilidade
+        <button onClick={exportXLSX} disabled={exporting} style={{ ...ghostBtnStyle, marginLeft: "auto", color: COLORS.amber, borderColor: COLORS.amberDim, opacity: exporting ? 0.6 : 1 }}>
+          <Download size={14} /> {exporting ? "Gerando…" : "Exportar Excel para contabilidade"}
         </button>
         <button onClick={downloadAtestadosZip} disabled={zipping} style={{ ...ghostBtnStyle, color: COLORS.amber, borderColor: COLORS.amberDim, opacity: zipping ? 0.6 : 1 }}>
           <Download size={14} /> {zipping ? "Preparando…" : "Baixar atestados do período"}
