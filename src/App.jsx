@@ -2552,30 +2552,23 @@ function ClosingTab({ employees, punches, leaves, holidays, restrictedStore }) {
   );
 
   const exportCSV = () => {
-    const header = "Funcionário,Loja,Dias trabalhados,Horas trabalhadas,Horas previstas,Saldo,Atrasos,Saídas antecipadas,Intervalos longos,Intervalos curtos,Duração média do intervalo (min),Dias de férias,Dias de atestado,Dias de licença maternidade,Dias de licença paternidade,Outras ausências (dias)\n";
-    const body = summary.map(s => {
-      const l = s.leaveDaysByType;
-      const delta = s.totalMin - s.expectedMin;
-      return [
-        s.emp.name,
-        STORES.find(st => st.id === s.emp.store)?.label || s.emp.store,
-        s.daysWorked,
-        fmtDuration(s.totalMin).replace("h", ":").padEnd(5, "0"),
-        fmtDuration(s.expectedMin).replace("h", ":").padEnd(5, "0"),
-        (delta >= 0 ? "+" : "-") + fmtDuration(Math.abs(delta)).replace("h", ":").padEnd(5, "0"),
-        s.lateCount,
-        s.earlyLeaveCount,
-        s.longIntervals,
-        s.shortIntervals,
-        s.avgIntervalMin ?? "",
-        l.ferias || 0,
-        l.atestado || 0,
-        l.maternidade || 0,
-        l.paternidade || 0,
-        l.outro || 0,
-      ].join(",");
-    }).join("\n");
-    const blob = new Blob([header + body], { type: "text/csv;charset=utf-8;" });
+    const header = "Funcionário,Data,Entrada,Saída,Entrada,Saída,Realizado,Previsto\n";
+    const rows2 = [];
+    summary.forEach(s => {
+      const empLeaves = leaves.filter(l => l.employeeId === s.emp.id);
+      const grouped = groupPunchesByDay(s.punchDetails, s.emp.schedule, holidaySet, empLeaves);
+      grouped.forEach(({ date, list, realizadoMin, previstoMin }) => {
+        const slot = (i) => list[i] ? list[i].time.slice(0, 5) : "";
+        rows2.push([
+          s.emp.name,
+          fmtDate(new Date(date + "T00:00:00")),
+          slot(0), slot(1), slot(2), slot(3),
+          fmtDuration(realizadoMin).replace("h", ":").padEnd(5, "0"),
+          fmtDuration(previstoMin).replace("h", ":").padEnd(5, "0"),
+        ].join(","));
+      });
+    });
+    const blob = new Blob([header + rows2.join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url; a.download = `fechamento-${startISO}-a-${endISO}${storeFilter !== "all" ? "-" + storeFilter : ""}.csv`; a.click();
