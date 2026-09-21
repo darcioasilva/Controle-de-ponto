@@ -1489,7 +1489,7 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 
       <div>
         <div style={fieldLabel}>{type === "atestado" ? "Foto do atestado" : "Foto (opcional)"}</div>
-        <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+        <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
         {photo ? (
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <img src={photo} alt="" style={{ width: 64, height: 64, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
@@ -2327,7 +2327,7 @@ function LeavesTab({ employees, leaves, persistLeaves, restrictedStore }) {
             </div>
           )}
           <textarea placeholder="Observação (opcional)" value={note} onChange={e => setNote(e.target.value)} rows={2} style={{ ...selectStyle, width: "100%", resize: "vertical", fontFamily: FONT_UI }} />
-          <input ref={fileRef} type="file" accept="image/*" capture="environment" onChange={handleFile} style={{ display: "none" }} />
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
           {photo ? (
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <img src={photo} alt="" style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 8, border: `1px solid ${COLORS.border}` }} />
