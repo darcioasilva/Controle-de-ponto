@@ -1763,7 +1763,14 @@ function MyHolerites({ empId, fetchLatestHolerites, persistHolerites }) {
     })();
   }, []);
 
-  const mine = useMemo(() => (list || []).filter(h => h.employeeId === empId).sort((a, b) => b.month.localeCompare(a.month)), [list, empId]);
+  const mine = useMemo(() => {
+    const typeOrder = HOLERITE_TYPES.map(t => t.id);
+    return (list || []).filter(h => h.employeeId === empId).sort((a, b) => {
+      const m = b.month.localeCompare(a.month);
+      if (m !== 0) return m;
+      return typeOrder.indexOf(a.docType || "mensal") - typeOrder.indexOf(b.docType || "mensal");
+    });
+  }, [list, empId]);
 
   const download = (h) => {
     const bytes = base64ToUint8(h.fileBase64);
@@ -1797,8 +1804,11 @@ function MyHolerites({ empId, fetchLatestHolerites, persistHolerites }) {
         <div key={h.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <FileText size={18} color={COLORS.amber} />
-            <div style={{ flex: 1, fontSize: 14, fontWeight: 600, textTransform: "capitalize" }}>
-              {new Date(h.month + "-01T00:00:00").toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, textTransform: "capitalize" }}>
+                {new Date(h.month + "-01T00:00:00").toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}
+              </div>
+              <div style={{ fontSize: 11, color: COLORS.textDim }}>{HOLERITE_TYPES.find(t => t.id === (h.docType || "mensal"))?.label || "Holerite mensal"}</div>
             </div>
             <button onClick={() => download(h)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}><Download size={13} /> Baixar</button>
           </div>
@@ -2662,8 +2672,16 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
 }
 
 // ---- Holerites (contabilidade manda um PDF só, com todo mundo — aqui a gente separa por funcionário) ----
+const HOLERITE_TYPES = [
+  { id: "mensal", label: "Holerite mensal" },
+  { id: "adiantamento", label: "Adiantamento" },
+  { id: "decimo_terceiro", label: "13º salário" },
+  { id: "ferias", label: "Férias" },
+];
+
 function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restrictedStore }) {
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
+  const [docType, setDocType] = useState(HOLERITE_TYPES[0].id);
   const [holerites, setHolerites] = useState(null);
   const [combinedFile, setCombinedFile] = useState(null); // { name, bytes, pageCount }
   const [pageRanges, setPageRanges] = useState({});
@@ -2709,6 +2727,7 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
       const srcDoc = await PDFDocument.load(combinedFile.bytes);
       const latest = await fetchLatestHolerites();
       const newRecords = [];
+      const typeLabel = HOLERITE_TYPES.find(t => t.id === docType)?.label || docType;
       for (const emp of visibleEmployees) {
         const rangeStr = (pageRanges[emp.id] || "").trim();
         if (!rangeStr) continue;
@@ -2721,13 +2740,16 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
         newRecords.push({
           id: `${Date.now()}-${emp.id}-${Math.random().toString(36).slice(2, 7)}`,
           employeeId: emp.id, employeeName: emp.name, store: emp.store,
-          month, fileBase64: uint8ToBase64(bytes), fileName: `holerite-${emp.name.replace(/[^\w\d]+/g, "_")}-${month}.pdf`,
+          month, docType, fileBase64: uint8ToBase64(bytes),
+          fileName: `${typeLabel.replace(/[^\w\d]+/g, "_")}-${emp.name.replace(/[^\w\d]+/g, "_")}-${month}.pdf`,
           uploadedAt: new Date().toISOString(),
         });
       }
       if (newRecords.length === 0) { setErr("Preencha ao menos um intervalo de páginas."); setProcessing(false); return; }
+      // Só substitui um holerite já existente do MESMO tipo, no mesmo mês — assim dá pra ter,
+      // por exemplo, o adiantamento e o holerite mensal do mesmo mês, sem um apagar o outro.
       const empIdsTouched = new Set(newRecords.map(r => r.employeeId));
-      const filtered = latest.filter(h => !(h.month === month && empIdsTouched.has(h.employeeId)));
+      const filtered = latest.filter(h => !(h.month === month && (h.docType || "mensal") === docType && empIdsTouched.has(h.employeeId)));
       const merged = [...filtered, ...newRecords];
       await persistHolerites(merged);
       setHolerites(merged);
@@ -2765,7 +2787,12 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
         <div style={{ fontSize: 12, color: COLORS.textDim }}>
           Envie o PDF único que a contabilidade manda (com o holerite de todo mundo junto). Depois, informe em quais páginas está o holerite de cada funcionário — confira os números abrindo o PDF antes.
         </div>
-        <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={{ ...selectStyle, alignSelf: "flex-start" }} />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={selectStyle} />
+          <select value={docType} onChange={e => setDocType(e.target.value)} style={selectStyle}>
+            {HOLERITE_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+          </select>
+        </div>
         <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
         <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
           <Upload size={14} /> Selecionar PDF combinado
@@ -2807,7 +2834,12 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
         ) : monthHolerites.map((h, i) => (
           <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
             <div style={{ flex: 1 }}>
-              <div style={{ fontSize: 13, fontWeight: 600 }}>{h.employeeName}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, display: "flex", alignItems: "center", gap: 6 }}>
+                {h.employeeName}
+                <span style={{ fontSize: 10, color: COLORS.amber, border: `1px solid ${COLORS.amberDim}`, borderRadius: 20, padding: "1px 7px", fontWeight: 600 }}>
+                  {HOLERITE_TYPES.find(t => t.id === (h.docType || "mensal"))?.label || "Holerite mensal"}
+                </span>
+              </div>
               <div style={{ fontSize: 11, color: h.confirmedAt ? COLORS.teal : COLORS.textDim }}>
                 {h.confirmedAt ? `Confirmado em ${fmtDate(new Date(h.confirmedAt))} às ${fmtTime(new Date(h.confirmedAt)).slice(0, 5)}` : "Aguardando confirmação"}
               </div>
