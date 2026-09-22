@@ -2682,6 +2682,7 @@ const HOLERITE_TYPES = [
 function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restrictedStore }) {
   const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
   const [docType, setDocType] = useState(HOLERITE_TYPES[0].id);
+  const [storeFilter, setStoreFilter] = useState(restrictedStore || STORES[0].id);
   const [holerites, setHolerites] = useState(null);
   const [combinedFile, setCombinedFile] = useState(null); // { name, bytes, pageCount }
   const [pageRanges, setPageRanges] = useState({});
@@ -2689,9 +2690,11 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
   const [err, setErr] = useState("");
   const fileRef = useRef(null);
 
+  const effectiveStore = restrictedStore || storeFilter;
+
   const visibleEmployees = useMemo(
-    () => employees.filter(e => (!restrictedStore || e.store === restrictedStore) && e.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
-    [employees, restrictedStore]
+    () => employees.filter(e => e.store === effectiveStore && e.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
+    [employees, effectiveStore]
   );
 
   const refresh = async () => {
@@ -2701,8 +2704,8 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
   useEffect(() => { refresh(); }, []);
 
   const monthHolerites = useMemo(
-    () => (holerites || []).filter(h => h.month === month && (!restrictedStore || h.store === restrictedStore)),
-    [holerites, month, restrictedStore]
+    () => (holerites || []).filter(h => h.month === month && h.store === effectiveStore),
+    [holerites, month, effectiveStore]
   );
 
   const handleFile = async (e) => {
@@ -2785,9 +2788,16 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{ fontSize: 13, fontWeight: 600 }}>Subir holerites do mês</div>
         <div style={{ fontSize: 12, color: COLORS.textDim }}>
-          Envie o PDF único que a contabilidade manda (com o holerite de todo mundo junto). Depois, informe em quais páginas está o holerite de cada funcionário — confira os números abrindo o PDF antes.
+          Envie o PDF único que a contabilidade manda pra essa loja (com o holerite de todo mundo junto — o arquivo do Afrika e o da Artex chegam separados). Depois, informe em quais páginas está o holerite de cada funcionário — confira os números abrindo o PDF antes.
         </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {restrictedStore ? (
+            <div style={{ ...selectStyle, color: COLORS.textDim }}>{STORES.find(s => s.id === restrictedStore)?.label}</div>
+          ) : (
+            <select value={storeFilter} onChange={e => { setStoreFilter(e.target.value); setCombinedFile(null); setPageRanges({}); }} style={selectStyle}>
+              {STORES.map(s => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          )}
           <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={selectStyle} />
           <select value={docType} onChange={e => setDocType(e.target.value)} style={selectStyle}>
             {HOLERITE_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
@@ -2825,7 +2835,7 @@ function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restr
 
       <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
         <div style={{ padding: "10px 14px", fontSize: 12, color: COLORS.textDim, borderBottom: `1px solid ${COLORS.border}` }}>
-          Holerites salvos em {month}
+          Holerites salvos em {month} — {STORES.find(s => s.id === effectiveStore)?.label}
         </div>
         {holerites === null ? (
           <div style={{ padding: 16, color: COLORS.textDim, fontSize: 13 }}>Carregando…</div>
