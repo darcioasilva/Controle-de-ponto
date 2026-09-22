@@ -1488,7 +1488,7 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
       </div>
 
       <div>
-        <div style={fieldLabel}>{type === "atestado" ? "Foto do atestado" : "Foto (opcional)"}</div>
+        <div style={fieldLabel}>{type === "atestado" ? "Foto ou arquivo do atestado" : "Foto (opcional)"}</div>
         <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} style={{ display: "none" }} />
         {photo ? (
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1497,14 +1497,19 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
             <button onClick={() => { setPhoto(null); setPhotoName(""); }} style={{ background: "none", border: "none", color: COLORS.textDim }}><X size={16} /></button>
           </div>
         ) : (
-          <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, width: "100%", justifyContent: "center" }}>
-            <ImageIcon size={14} /> Anexar foto
+          <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, width: "100%", justifyContent: "center", borderColor: type === "atestado" ? COLORS.amber : COLORS.border }}>
+            <ImageIcon size={14} /> Anexar foto ou arquivo
           </button>
+        )}
+        {type === "atestado" && !photo && (
+          <div style={{ color: COLORS.amber, fontSize: 12, marginTop: 6 }}>
+            Atestado médico precisa de uma foto ou arquivo anexado. Se não tiver o documento agora, escolha outro tipo de solicitação (ex.: "Esqueci de bater o ponto").
+          </div>
         )}
       </div>
 
       <button
-        onClick={submit} disabled={!note.trim() || sending || (type === "atestado" && partial && (!partialStart || !partialEnd || partialEnd <= partialStart))}
+        onClick={submit} disabled={!note.trim() || sending || (type === "atestado" && !photo) || (type === "atestado" && partial && (!partialStart || !partialEnd || partialEnd <= partialStart))}
         style={{
           ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber,
           opacity: !note.trim() || sending ? 0.6 : 1, marginTop: 4,
