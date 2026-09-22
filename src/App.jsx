@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import Papa from "papaparse";
 import JSZip from "jszip";
 import ExcelJS from "exceljs";
+import { PDFDocument } from "pdf-lib";
 import {
   Clock, Check, X, Users, ListChecks, Lock, Plus, Trash2, Download, ChevronLeft,
   AlertCircle, Camera, MapPin, FileText, Send, CheckCircle2, XCircle, Image as ImageIcon, Inbox, CalendarDays, FileSpreadsheet, Upload
@@ -21,6 +22,7 @@ const OVERTIME_CODE_KEY = "ponto-overtime-code";
 const OVERTIME_CODE_VALID_MIN = 30; // minutos de validade do código gerado
 const STORE_COORDS_KEY = "ponto-store-coords";
 const HOLIDAYS_KEY = "ponto-holidays";
+const HOLERITES_KEY = "ponto-holerites";
 const DEFAULT_ADMIN_PIN = "9999";
 
 const LEAVE_TYPES = [
@@ -673,6 +675,35 @@ function resizeImageFile(file, maxW = 600, maxH = 800, quality = 0.6) {
   });
 }
 
+// ---------- Conversão de bytes de PDF <-> texto base64, pra guardar no banco ----------
+function uint8ToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+function base64ToUint8(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+// Interpreta um intervalo de páginas digitado (ex: "1-2", "3", "1,4-5") em índices 0-based
+function parsePageRange(str, maxPage) {
+  const parts = str.split(",").map(s => s.trim()).filter(Boolean);
+  const pages = [];
+  for (const p of parts) {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(p);
+    if (!m) return null;
+    const start = parseInt(m[1], 10), end = m[2] ? parseInt(m[2], 10) : start;
+    if (start < 1 || end > maxPage || start > end) return null;
+    for (let i = start; i <= end; i++) pages.push(i - 1);
+  }
+  return pages.length ? pages : null;
+}
+
 // ---------- Root ----------
 export default function App() {
   const [view, setView] = useState("punch"); // punch | request | admin | admin-login
@@ -771,6 +802,10 @@ export default function App() {
   const fetchLatestStoreCoords = useCallback(async () => safeFetchLatest(STORE_COORDS_KEY, {}), [safeFetchLatest]);
   const persistHolidays = useCallback(async (next) => { await saveJSON(HOLIDAYS_KEY, next); setHolidays(next); }, []);
   const fetchLatestHolidays = useCallback(async () => safeFetchLatest(HOLIDAYS_KEY, []), [safeFetchLatest]);
+  // Holerites não entram no carregamento inicial (são arquivos PDF, podem ficar grandes) —
+  // só são buscados quando a tela de Holerites é aberta, no Admin ou pelo funcionário.
+  const persistHolerites = useCallback(async (next) => { await saveJSON(HOLERITES_KEY, next); }, []);
+  const fetchLatestHolerites = useCallback(async () => safeFetchLatest(HOLERITES_KEY, []), [safeFetchLatest]);
   const persistOvertimeCode = useCallback(async (next) => { await saveJSON(OVERTIME_CODE_KEY, next); setOvertimeCode(next); }, []);
   const fetchLatestOvertimeCode = useCallback(async () => await loadJSON(OVERTIME_CODE_KEY, null), []);
 
@@ -817,6 +852,7 @@ export default function App() {
         {view === "mypunches" && (
           <MyPunchesScreen
             employees={employees} punches={punches} requests={requests} leaves={leaves} holidays={holidays} store={store}
+            fetchLatestHolerites={fetchLatestHolerites} persistHolerites={persistHolerites}
             onExit={() => setView("punch")}
           />
         )}
@@ -830,6 +866,7 @@ export default function App() {
             requests={requests} persistRequests={persistRequests}
             leaves={leaves} persistLeaves={persistLeaves}
             holidays={holidays} persistHolidays={persistHolidays} fetchLatestHolidays={fetchLatestHolidays}
+            fetchLatestHolerites={fetchLatestHolerites} persistHolerites={persistHolerites}
             adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin}
             storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords}
             overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode}
@@ -1524,7 +1561,7 @@ function RequestForm({ employees, store, persistRequests, requests, onDone }) {
 const fieldLabel = { fontSize: 12, color: COLORS.textDim, marginBottom: 6 };
 
 // ---------- Meus Pontos (visão do próprio funcionário) ----------
-function MyPunchesScreen({ employees, punches, requests, leaves, holidays, store, onExit }) {
+function MyPunchesScreen({ employees, punches, requests, leaves, holidays, store, fetchLatestHolerites, persistHolerites, onExit }) {
   const [pin, setPin] = useState("");
   const [error, setError] = useState(false);
   const [emp, setEmp] = useState(null);
@@ -1544,7 +1581,7 @@ function MyPunchesScreen({ employees, punches, requests, leaves, holidays, store
   const handleClear = () => { setPin(""); setError(false); };
 
   if (emp) {
-    return <MyPunchesDetail emp={emp} punches={punches} requests={requests} leaves={leaves} holidays={holidays} onExit={() => setEmp(null)} onFullExit={onExit} />;
+    return <MyPunchesDetail emp={emp} punches={punches} requests={requests} leaves={leaves} holidays={holidays} fetchLatestHolerites={fetchLatestHolerites} persistHolerites={persistHolerites} onExit={() => setEmp(null)} onFullExit={onExit} />;
   }
 
   return (
@@ -1577,7 +1614,7 @@ function MyPunchesScreen({ employees, punches, requests, leaves, holidays, store
 
 const INACTIVITY_MS = 90000; // fecha sozinho depois de 90s sem uso (protege dispositivo compartilhado)
 
-function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onFullExit }) {
+function MyPunchesDetail({ emp, punches, requests, leaves, holidays, fetchLatestHolerites, persistHolerites, onExit, onFullExit }) {
   const [tab, setTab] = useState("pontos");
   const [periodType, setPeriodType] = useState("week"); // week | month | custom
   const [customStart, setCustomStart] = useState(fmtDateKey(new Date()).slice(0, 8) + "01");
@@ -1638,6 +1675,11 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
           background: tab === "solicitacoes" ? COLORS.surfaceRaised : "transparent",
           color: tab === "solicitacoes" ? COLORS.text : COLORS.textDim,
         }}><Inbox size={14} /> Minhas solicitações</button>
+        <button onClick={() => setTab("holerites")} style={{
+          ...ghostBtnStyle, flex: 1, justifyContent: "center",
+          background: tab === "holerites" ? COLORS.surfaceRaised : "transparent",
+          color: tab === "holerites" ? COLORS.text : COLORS.textDim,
+        }}><FileText size={14} /> Holerites</button>
       </div>
 
       {tab === "pontos" ? (
@@ -1681,7 +1723,7 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
             <DayPunchesTable groupedByDate={groupedByDate} empLeaves={empLeavesForCalc} />
           </div>
         </>
-      ) : (
+      ) : tab === "solicitacoes" ? (
         <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
           {myRequests.length === 0 ? (
             <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhuma solicitação enviada ainda.</div>
@@ -1697,6 +1739,8 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
             </div>
           ))}
         </div>
+      ) : (
+        <MyHolerites empId={emp.id} fetchLatestHolerites={fetchLatestHolerites} persistHolerites={persistHolerites} />
       )}
 
       <button onClick={onExit} style={{ ...ghostBtnStyle, justifyContent: "center", marginTop: 4 }}>
@@ -1705,6 +1749,70 @@ function MyPunchesDetail({ emp, punches, requests, leaves, holidays, onExit, onF
       <div style={{ color: COLORS.textDim, fontSize: 11, textAlign: "center" }}>
         Por segurança, essa tela fecha sozinha depois de um tempo sem uso.
       </div>
+    </div>
+  );
+}
+
+function MyHolerites({ empId, fetchLatestHolerites, persistHolerites }) {
+  const [list, setList] = useState(null);
+  const [confirming, setConfirming] = useState(null);
+  useEffect(() => {
+    (async () => {
+      try { setList(await fetchLatestHolerites()); }
+      catch (e) { setList([]); }
+    })();
+  }, []);
+
+  const mine = useMemo(() => (list || []).filter(h => h.employeeId === empId).sort((a, b) => b.month.localeCompare(a.month)), [list, empId]);
+
+  const download = (h) => {
+    const bytes = base64ToUint8(h.fileBase64);
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = h.fileName || `holerite-${h.month}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const confirmReceipt = async (h) => {
+    setConfirming(h.id);
+    try {
+      const latest = await fetchLatestHolerites();
+      const next = latest.map(x => x.id === h.id ? { ...x, confirmedAt: new Date().toISOString() } : x);
+      await persistHolerites(next);
+      setList(next);
+    } catch (e) {
+      window.alert("Não foi possível confirmar agora (falha de conexão). Tente novamente.");
+    } finally {
+      setConfirming(null);
+    }
+  };
+
+  return (
+    <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+      {list === null ? (
+        <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Carregando…</div>
+      ) : mine.length === 0 ? (
+        <div style={{ padding: 20, textAlign: "center", color: COLORS.textDim, fontSize: 13 }}>Nenhum holerite disponível ainda.</div>
+      ) : mine.map((h, i) => (
+        <div key={h.id} style={{ display: "flex", flexDirection: "column", gap: 6, padding: "12px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <FileText size={18} color={COLORS.amber} />
+            <div style={{ flex: 1, fontSize: 14, fontWeight: 600, textTransform: "capitalize" }}>
+              {new Date(h.month + "-01T00:00:00").toLocaleDateString("pt-BR", { month: "long", year: "numeric" })}
+            </div>
+            <button onClick={() => download(h)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}><Download size={13} /> Baixar</button>
+          </div>
+          {h.confirmedAt ? (
+            <div style={{ fontSize: 11, color: COLORS.teal, display: "flex", alignItems: "center", gap: 4, marginLeft: 28 }}>
+              <CheckCircle2 size={12} /> Recebimento confirmado em {fmtDate(new Date(h.confirmedAt))} às {fmtTime(new Date(h.confirmedAt)).slice(0, 5)}
+            </div>
+          ) : (
+            <button onClick={() => confirmReceipt(h)} disabled={confirming === h.id} style={{ ...ghostBtnStyle, alignSelf: "flex-start", marginLeft: 28, fontSize: 12, padding: "5px 10px", color: COLORS.amber, borderColor: COLORS.amberDim, opacity: confirming === h.id ? 0.6 : 1 }}>
+              {confirming === h.id ? "Confirmando…" : "Confirmar recebimento"}
+            </button>
+          )}
+        </div>
+      ))}
     </div>
   );
 }
@@ -1747,7 +1855,7 @@ function AdminLogin({ adminList, onSuccess, onCancel }) {
 }
 
 // ---------- Admin panel ----------
-function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, holidays, persistHolidays, fetchLatestHolidays, adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
+function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetchLatestPunches, requests, persistRequests, leaves, persistLeaves, holidays, persistHolidays, fetchLatestHolidays, fetchLatestHolerites, persistHolerites, adminList, persistAdminList, fetchLatestAdminList, currentAdmin, storeCoords, persistStoreCoords, fetchLatestStoreCoords, overtimeCode, persistOvertimeCode, onExit }) {
   const [tab, setTab] = useState("records");
   const restrictedStore = currentAdmin && currentAdmin.role !== "master" ? currentAdmin.store : null;
 
@@ -1773,6 +1881,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
         <TabBtn icon={Inbox} label="Solicitações" badge={pendingCount} active={tab === "requests"} onClick={() => setTab("requests")} />
         <TabBtn icon={CalendarDays} label="Ausências" badge={onLeaveToday} active={tab === "leaves"} onClick={() => setTab("leaves")} />
         <TabBtn icon={FileSpreadsheet} label="Fechamento" active={tab === "closing"} onClick={() => setTab("closing")} />
+        <TabBtn icon={FileText} label="Holerites" active={tab === "holerites"} onClick={() => setTab("holerites")} />
         <TabBtn icon={Upload} label="Importar" active={tab === "import"} onClick={() => setTab("import")} />
         <TabBtn icon={Users} label="Funcionários" active={tab === "employees"} onClick={() => setTab("employees")} />
         <TabBtn icon={Lock} label="Config." active={tab === "settings"} onClick={() => setTab("settings")} />
@@ -1781,6 +1890,7 @@ function AdminPanel({ employees, persistEmployees, punches, persistPunches, fetc
       {tab === "requests" && <RequestsTab requests={requests} persistRequests={persistRequests} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} leaves={leaves} persistLeaves={persistLeaves} currentAdmin={currentAdmin} restrictedStore={restrictedStore} />}
       {tab === "leaves" && <LeavesTab employees={employees} leaves={leaves} persistLeaves={persistLeaves} restrictedStore={restrictedStore} />}
       {tab === "closing" && <ClosingTab employees={employees} punches={punches} leaves={leaves} holidays={holidays} restrictedStore={restrictedStore} />}
+      {tab === "holerites" && <HoleritesTab employees={employees} fetchLatestHolerites={fetchLatestHolerites} persistHolerites={persistHolerites} restrictedStore={restrictedStore} />}
       {tab === "import" && <ImportTab employees={employees} punches={punches} persistPunches={persistPunches} fetchLatestPunches={fetchLatestPunches} restrictedStore={restrictedStore} />}
       {tab === "employees" && <EmployeesTab employees={employees} persistEmployees={persistEmployees} restrictedStore={restrictedStore} />}
       {tab === "settings" && <SettingsTab adminList={adminList} persistAdminList={persistAdminList} fetchLatestAdminList={fetchLatestAdminList} currentAdmin={currentAdmin} storeCoords={storeCoords} persistStoreCoords={persistStoreCoords} fetchLatestStoreCoords={fetchLatestStoreCoords} restrictedStore={restrictedStore} overtimeCode={overtimeCode} persistOvertimeCode={persistOvertimeCode} employees={employees} punches={punches} requests={requests} leaves={leaves} holidays={holidays} persistHolidays={persistHolidays} fetchLatestHolidays={fetchLatestHolidays} />}
@@ -2546,6 +2656,166 @@ function ImportTab({ employees, punches, persistPunches, fetchLatestPunches, res
 
       <div style={{ color: COLORS.textDim, fontSize: 11 }}>
         As batidas importadas entram sem foto e sem localização (o Pontomais não exporta essas informações), mas contam normalmente nas horas trabalhadas e no fechamento mensal. Importações repetidas do mesmo arquivo não duplicam os registros.
+      </div>
+    </div>
+  );
+}
+
+// ---- Holerites (contabilidade manda um PDF só, com todo mundo — aqui a gente separa por funcionário) ----
+function HoleritesTab({ employees, fetchLatestHolerites, persistHolerites, restrictedStore }) {
+  const [month, setMonth] = useState(fmtDateKey(new Date()).slice(0, 7));
+  const [holerites, setHolerites] = useState(null);
+  const [combinedFile, setCombinedFile] = useState(null); // { name, bytes, pageCount }
+  const [pageRanges, setPageRanges] = useState({});
+  const [processing, setProcessing] = useState(false);
+  const [err, setErr] = useState("");
+  const fileRef = useRef(null);
+
+  const visibleEmployees = useMemo(
+    () => employees.filter(e => (!restrictedStore || e.store === restrictedStore) && e.active !== false).sort((a, b) => a.name.localeCompare(b.name)),
+    [employees, restrictedStore]
+  );
+
+  const refresh = async () => {
+    try { setHolerites(await fetchLatestHolerites()); }
+    catch (e) { setHolerites([]); }
+  };
+  useEffect(() => { refresh(); }, []);
+
+  const monthHolerites = useMemo(
+    () => (holerites || []).filter(h => h.month === month && (!restrictedStore || h.store === restrictedStore)),
+    [holerites, month, restrictedStore]
+  );
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setErr("");
+    try {
+      const buf = await file.arrayBuffer();
+      const doc = await PDFDocument.load(buf);
+      setCombinedFile({ name: file.name, bytes: new Uint8Array(buf), pageCount: doc.getPageCount() });
+      setPageRanges({});
+    } catch (e2) {
+      setErr("Não consegui abrir esse PDF. Confere se o arquivo não está corrompido.");
+      setCombinedFile(null);
+    }
+  };
+
+  const generateAndSave = async () => {
+    if (!combinedFile) return;
+    setProcessing(true); setErr("");
+    try {
+      const srcDoc = await PDFDocument.load(combinedFile.bytes);
+      const latest = await fetchLatestHolerites();
+      const newRecords = [];
+      for (const emp of visibleEmployees) {
+        const rangeStr = (pageRanges[emp.id] || "").trim();
+        if (!rangeStr) continue;
+        const pages = parsePageRange(rangeStr, combinedFile.pageCount);
+        if (!pages) throw new Error(`Intervalo de páginas inválido para ${emp.name}: "${rangeStr}" (o PDF tem ${combinedFile.pageCount} página(s)).`);
+        const newDoc = await PDFDocument.create();
+        const copiedPages = await newDoc.copyPages(srcDoc, pages);
+        copiedPages.forEach(p => newDoc.addPage(p));
+        const bytes = await newDoc.save();
+        newRecords.push({
+          id: `${Date.now()}-${emp.id}-${Math.random().toString(36).slice(2, 7)}`,
+          employeeId: emp.id, employeeName: emp.name, store: emp.store,
+          month, fileBase64: uint8ToBase64(bytes), fileName: `holerite-${emp.name.replace(/[^\w\d]+/g, "_")}-${month}.pdf`,
+          uploadedAt: new Date().toISOString(),
+        });
+      }
+      if (newRecords.length === 0) { setErr("Preencha ao menos um intervalo de páginas."); setProcessing(false); return; }
+      const empIdsTouched = new Set(newRecords.map(r => r.employeeId));
+      const filtered = latest.filter(h => !(h.month === month && empIdsTouched.has(h.employeeId)));
+      const merged = [...filtered, ...newRecords];
+      await persistHolerites(merged);
+      setHolerites(merged);
+      setCombinedFile(null); setPageRanges({});
+    } catch (e) {
+      setErr(e.message || "Não foi possível processar o PDF agora. Tente novamente.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  const removeHolerite = async (id) => {
+    try {
+      const latest = await fetchLatestHolerites();
+      const next = latest.filter(h => h.id !== id);
+      await persistHolerites(next);
+      setHolerites(next);
+    } catch (e) {
+      window.alert("Não foi possível excluir agora (falha de conexão). Tente novamente.");
+    }
+  };
+
+  const downloadHolerite = (h) => {
+    const bytes = base64ToUint8(h.fileBase64);
+    const blob = new Blob([bytes], { type: "application/pdf" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = h.fileName || `holerite-${h.employeeName}.pdf`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ fontSize: 13, fontWeight: 600 }}>Subir holerites do mês</div>
+        <div style={{ fontSize: 12, color: COLORS.textDim }}>
+          Envie o PDF único que a contabilidade manda (com o holerite de todo mundo junto). Depois, informe em quais páginas está o holerite de cada funcionário — confira os números abrindo o PDF antes.
+        </div>
+        <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={{ ...selectStyle, alignSelf: "flex-start" }} />
+        <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
+        <button onClick={() => fileRef.current?.click()} style={{ ...ghostBtnStyle, alignSelf: "flex-start", color: COLORS.amber, borderColor: COLORS.amberDim }}>
+          <Upload size={14} /> Selecionar PDF combinado
+        </button>
+        {combinedFile && (
+          <div style={{ fontSize: 12, color: COLORS.textDim }}>
+            Arquivo: {combinedFile.name} · {combinedFile.pageCount} página(s)
+          </div>
+        )}
+        {err && <div style={{ color: COLORS.red, fontSize: 12 }}>{err}</div>}
+
+        {combinedFile && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6 }}>
+            {visibleEmployees.map(emp => (
+              <div key={emp.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <div style={{ flex: 1, fontSize: 13 }}>{emp.name}</div>
+                <input
+                  placeholder="ex: 1-2 ou 3" value={pageRanges[emp.id] || ""}
+                  onChange={e => setPageRanges(prev => ({ ...prev, [emp.id]: e.target.value }))}
+                  style={{ ...selectStyle, width: 100 }}
+                />
+              </div>
+            ))}
+            <button onClick={generateAndSave} disabled={processing} style={{ ...ghostBtnStyle, justifyContent: "center", background: COLORS.amber, color: "#1A1400", borderColor: COLORS.amber, opacity: processing ? 0.6 : 1, marginTop: 4 }}>
+              {processing ? "Processando…" : "Gerar e salvar holerites"}
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div style={{ background: COLORS.surface, border: `1px solid ${COLORS.border}`, borderRadius: 12, overflow: "hidden" }}>
+        <div style={{ padding: "10px 14px", fontSize: 12, color: COLORS.textDim, borderBottom: `1px solid ${COLORS.border}` }}>
+          Holerites salvos em {month}
+        </div>
+        {holerites === null ? (
+          <div style={{ padding: 16, color: COLORS.textDim, fontSize: 13 }}>Carregando…</div>
+        ) : monthHolerites.length === 0 ? (
+          <div style={{ padding: 16, color: COLORS.textDim, fontSize: 13 }}>Nenhum holerite salvo nesse mês ainda.</div>
+        ) : monthHolerites.map((h, i) => (
+          <div key={h.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "10px 14px", borderTop: i > 0 ? `1px solid ${COLORS.border}` : "none" }}>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontSize: 13, fontWeight: 600 }}>{h.employeeName}</div>
+              <div style={{ fontSize: 11, color: h.confirmedAt ? COLORS.teal : COLORS.textDim }}>
+                {h.confirmedAt ? `Confirmado em ${fmtDate(new Date(h.confirmedAt))} às ${fmtTime(new Date(h.confirmedAt)).slice(0, 5)}` : "Aguardando confirmação"}
+              </div>
+            </div>
+            <button onClick={() => downloadHolerite(h)} style={{ ...ghostBtnStyle, padding: "5px 9px", fontSize: 12 }}><Download size={13} /> Baixar</button>
+            <button onClick={() => removeHolerite(h.id)} style={{ background: "none", border: "none", color: COLORS.textDim, padding: 4 }}><Trash2 size={14} /></button>
+          </div>
+        ))}
       </div>
     </div>
   );
