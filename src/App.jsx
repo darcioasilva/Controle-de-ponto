@@ -147,7 +147,7 @@ async function runBackup(snapshotData, forceNew = false) {
 
 const STORES = [
   { id: "afrika", label: "Afrika Restaurante" },
-  { id: "artex", label: "Artex" },
+  { id: "artex", label: "Filo & Trama" },
 ];
 
 const REQUEST_TYPES = [
